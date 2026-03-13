@@ -1,37 +1,32 @@
 import type { Context } from "grammy";
 import { clearList } from "../db.js";
+import { renderIdleStatus } from "../render.js";
+import { editStatusMessage, deleteMessages } from "../status.js";
 import { logger } from "../logger.js";
+import { cancelAutoReset } from "./compact.js";
 
-async function deleteMessages(ctx: Context, chatId: number, msgIds: number[]): Promise<void> {
-  for (const msgId of msgIds) {
-    try {
-      await ctx.api.deleteMessage(chatId, msgId);
-    } catch {
-      // Message may already be deleted by the user — ignore
-      logger.debug("clear", `chat:${chatId} could not delete msg:${msgId}`);
-    }
-  }
-}
-
-export async function handleClearCommand(ctx: Context): Promise<void> {
+/** Called when user taps [Clear List] button */
+export async function handleClearList(ctx: Context): Promise<void> {
   const chatId = ctx.chat?.id;
   if (!chatId) return;
 
-  const { count, headerMsgId, itemMsgIds } = clearList(chatId);
+  // Cancel any pending auto-reset timer
+  cancelAutoReset(chatId);
+
+  const { count, itemMsgIds } = clearList(chatId);
 
   if (count === 0) {
-    logger.debug("clear", `chat:${chatId} no list to clear`);
-    await ctx.reply("No active shopping list\\.", { parse_mode: "MarkdownV2" });
+    await ctx.answerCallbackQuery({ text: "No active list" });
     return;
   }
 
-  // Delete item messages and header from the chat
-  const allMsgIds = headerMsgId ? [headerMsgId, ...itemMsgIds] : itemMsgIds;
-  await deleteMessages(ctx, chatId, allMsgIds);
-  logger.info("clear", `chat:${chatId} cleared ${count} items, deleted ${allMsgIds.length} messages`);
+  // Delete item messages from chat
+  await deleteMessages(ctx.api, chatId, itemMsgIds);
+  logger.info("clear", `chat:${chatId} cleared ${count} items, deleted ${itemMsgIds.length} messages`);
 
-  await ctx.reply(
-    `Shopping list cleared \\(${count} item${count > 1 ? "s" : ""} removed\\)\\.`,
-    { parse_mode: "MarkdownV2" },
-  );
+  // Edit status message back to IDLE
+  const status = renderIdleStatus();
+  await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
+
+  await ctx.answerCallbackQuery();
 }

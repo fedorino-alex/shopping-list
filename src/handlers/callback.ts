@@ -1,8 +1,14 @@
 import type { Context } from "grammy";
-import { toggleItem, getActiveList } from "../db.js";
-import { renderItemText, renderItemKeyboard, renderHeaderText } from "../render.js";
+import { toggleItem, getActiveList, getVisibleItems } from "../db.js";
+import { renderItemText, renderItemKeyboard, renderShoppingStatus, escapeMarkdown } from "../render.js";
+import { editStatusMessage } from "../status.js";
 import { logger } from "../logger.js";
+import { handleNewList } from "./list.js";
+import { handleStartShopping } from "./shop.js";
+import { handleClearList } from "./clear.js";
+import { handleCompact, scheduleAutoReset, cancelAutoReset } from "./compact.js";
 
+/** Routes all callback queries to the appropriate handler. */
 export async function handleCallbackQuery(ctx: Context): Promise<void> {
   const data = ctx.callbackQuery?.data;
   const chatId = ctx.chat?.id;
@@ -12,17 +18,32 @@ export async function handleCallbackQuery(ctx: Context): Promise<void> {
     return;
   }
 
-  // Parse callback data: "toggle:<item_id>"
-  const match = data.match(/^toggle:(\d+)$/);
-  if (!match) {
-    logger.error("callback", `chat:${chatId} unknown callback data: "${data}"`);
-    await ctx.answerCallbackQuery({ text: "Unknown action" });
-    return;
+  // Route action callbacks
+  if (data === "action:new_list") {
+    return handleNewList(ctx);
+  }
+  if (data === "action:start_shopping") {
+    return handleStartShopping(ctx);
+  }
+  if (data === "action:clear_list") {
+    return handleClearList(ctx);
+  }
+  if (data === "action:compact") {
+    return handleCompact(ctx);
   }
 
-  const itemId = parseInt(match[1], 10);
+  // Route toggle callbacks
+  const match = data.match(/^toggle:(\d+)$/);
+  if (match) {
+    return handleToggle(ctx, chatId, parseInt(match[1], 10));
+  }
 
-  // Toggle the item in the database
+  logger.error("callback", `chat:${chatId} unknown callback data: "${data}"`);
+  await ctx.answerCallbackQuery({ text: "Unknown action" });
+}
+
+/** Handles a toggle:<item_id> callback — flips complete state, edits message, updates header. */
+async function handleToggle(ctx: Context, chatId: number, itemId: number): Promise<void> {
   const item = toggleItem(itemId);
   if (!item) {
     logger.error("callback", `chat:${chatId} item #${itemId} not found`);
@@ -32,10 +53,10 @@ export async function handleCallbackQuery(ctx: Context): Promise<void> {
 
   logger.info(
     "callback",
-    `chat:${chatId} toggled item #${item.id} "${item.name}" -> ${item.done ? "done" : "undone"}`,
+    `chat:${chatId} toggled item #${item.id} "${item.name}" -> ${item.complete ? "complete" : "active"}`,
   );
 
-  // Edit the item message in-place with updated text and keyboard
+  // Edit the item message in-place
   try {
     await ctx.editMessageText(renderItemText(item), {
       parse_mode: "MarkdownV2",
@@ -45,23 +66,28 @@ export async function handleCallbackQuery(ctx: Context): Promise<void> {
     logger.error("callback", `chat:${chatId} failed to edit item msg for #${item.id}`, err);
   }
 
-  // Update the header message with the new done counter
-  try {
-    const listData = getActiveList(chatId);
-    if (listData && listData.list.header_msg_id) {
-      await ctx.api.editMessageText(
+  // Update the status/header message with new counter
+  const listData = getActiveList(chatId);
+  if (listData) {
+    const visibleItems = getVisibleItems(listData.list.id);
+
+    const status = renderShoppingStatus(visibleItems);
+    await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
+
+    // Check if all visible items are now complete — schedule auto-reset
+    if (visibleItems.length > 0 && visibleItems.every((i) => i.complete)) {
+      logger.info("callback", `chat:${chatId} all visible items complete, scheduling auto-reset`);
+      const confirmMsg = await ctx.api.sendMessage(
         chatId,
-        listData.list.header_msg_id,
-        renderHeaderText(listData.items),
+        escapeMarkdown("All done! List will auto-clear in 5 minutes."),
         { parse_mode: "MarkdownV2" },
       );
+      scheduleAutoReset(chatId, ctx.api, confirmMsg.message_id);
+    } else {
+      // Not all complete — cancel any pending auto-reset (e.g. user tapped Undo)
+      cancelAutoReset(chatId);
     }
-  } catch (err) {
-    // Header edit can fail if message hasn't changed (all items same state)
-    // or if the header was deleted by the user — this is fine
-    logger.error("callback", `chat:${chatId} failed to edit header`, err);
   }
 
-  // Always answer the callback query to dismiss the loading spinner
   await ctx.answerCallbackQuery();
 }

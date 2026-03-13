@@ -1,5 +1,7 @@
 import type { Context } from "grammy";
-import { createList, getActiveList, clearList } from "../db.js";
+import { createList, getActiveList } from "../db.js";
+import { renderAwaitingStatus, renderNormalStatus } from "../render.js";
+import { editStatusMessage } from "../status.js";
 import { logger } from "../logger.js";
 
 // Chat IDs that are waiting for the user to send a list of items
@@ -9,45 +11,20 @@ export function isAwaitingList(chatId: number): boolean {
   return awaitingList.has(chatId);
 }
 
-export async function handleListCommand(ctx: Context): Promise<void> {
+/** Called when user taps [New List] button */
+export async function handleNewList(ctx: Context): Promise<void> {
   const chatId = ctx.chat?.id;
   if (!chatId) return;
 
   awaitingList.add(chatId);
   logger.debug("list", `chat:${chatId} now awaiting list input`);
 
-  await ctx.reply("Send me a comma\\-separated list of items to buy\\.", {
-    parse_mode: "MarkdownV2",
-  });
+  const status = renderAwaitingStatus();
+  await editStatusMessage(ctx.api, chatId, status.text);
+  await ctx.answerCallbackQuery();
 }
 
-/** Delete old list's Telegram messages before creating a new one. */
-async function deleteOldListMessages(ctx: Context, chatId: number): Promise<void> {
-  const oldData = getActiveList(chatId);
-  if (!oldData) return;
-
-  const { list, items } = oldData;
-  const msgIds: number[] = [];
-  if (list.header_msg_id) msgIds.push(list.header_msg_id);
-  for (const item of items) {
-    if (item.message_id) msgIds.push(item.message_id);
-  }
-
-  if (msgIds.length === 0) return;
-
-  logger.debug("list", `chat:${chatId} deleting ${msgIds.length} messages from old list #${list.id}`);
-  for (const msgId of msgIds) {
-    try {
-      await ctx.api.deleteMessage(chatId, msgId);
-    } catch {
-      // Message may already be deleted — ignore
-    }
-  }
-
-  // Clear old list from DB
-  clearList(chatId);
-}
-
+/** Called when user sends text while in AWAITING_INPUT state */
 export async function handleListInput(ctx: Context): Promise<void> {
   const chatId = ctx.chat?.id;
   const text = ctx.message?.text;
@@ -62,18 +39,27 @@ export async function handleListInput(ctx: Context): Promise<void> {
 
   if (items.length === 0) {
     logger.debug("list", `chat:${chatId} sent empty list`);
-    await ctx.reply("No items found. Try again with /list");
+    // Stay in awaiting state
+    awaitingList.add(chatId);
+    const status = renderAwaitingStatus();
+    await editStatusMessage(ctx.api, chatId, status.text);
     return;
   }
 
-  // Delete previous list messages from chat before creating a new one
-  await deleteOldListMessages(ctx, chatId);
+  // Delete the user's text message to keep the chat clean (modal-like behavior)
+  const msgId = ctx.message?.message_id;
+  if (msgId) {
+    try {
+      await ctx.api.deleteMessage(chatId, msgId);
+    } catch {
+      // May lack delete permission in groups -- ignore
+    }
+  }
 
   const listId = createList(chatId, items);
   logger.info("list", `chat:${chatId} created list #${listId} with ${items.length} items: [${items.join(", ")}]`);
 
-  await ctx.reply(
-    `Saved ${items.length} item${items.length > 1 ? "s" : ""}\\! Send /shop when you're ready to go shopping\\.`,
-    { parse_mode: "MarkdownV2" },
-  );
+  // Move to NORMAL state
+  const status = renderNormalStatus(items.length);
+  await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
 }

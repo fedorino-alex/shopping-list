@@ -2,10 +2,11 @@ import "dotenv/config";
 import { Bot } from "grammy";
 
 import { logger } from "./logger.js";
-import { handleListCommand, handleListInput, isAwaitingList } from "./handlers/list.js";
-import { handleClearCommand } from "./handlers/clear.js";
-import { handleShopCommand } from "./handlers/shop.js";
+import { getActiveList } from "./db.js";
+import { renderIdleStatus, renderNormalStatus } from "./render.js";
+import { sendStatusMessage } from "./status.js";
 import { handleCallbackQuery } from "./handlers/callback.js";
+import { isAwaitingList, handleListInput } from "./handlers/list.js";
 
 const token = process.env.BOT_TOKEN;
 if (!token) {
@@ -14,59 +15,44 @@ if (!token) {
 
 const bot = new Bot(token);
 
-// --- Commands ---
+// --- /start: the only slash command — creates the initial status message ---
 
-bot.command("start", (ctx) => {
+bot.command("start", async (ctx) => {
+  const chatId = ctx.chat.id;
   const user = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
-  logger.info("cmd", `/start from chat:${ctx.chat.id} user:${user}`);
-  return ctx.reply(
-    "Shopping List Bot\\!\n\n"
-      + "/list \\- create a new shopping list\n"
-      + "/shop \\- display your list with buttons\n"
-      + "/clear \\- clear the current list",
-    { parse_mode: "MarkdownV2" },
-  );
+  logger.info("cmd", `/start from chat:${chatId} user:${user}`);
+
+  const data = getActiveList(chatId);
+  if (data) {
+    // List exists — show NORMAL state
+    const status = renderNormalStatus(data.items.length);
+    await sendStatusMessage(ctx.api, chatId, status.text, status.keyboard);
+  } else {
+    // No list — show IDLE state
+    const status = renderIdleStatus();
+    await sendStatusMessage(ctx.api, chatId, status.text, status.keyboard);
+  }
 });
 
-bot.command("list", (ctx) => {
-  const user = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
-  logger.info("cmd", `/list from chat:${ctx.chat.id} user:${user}`);
-  return handleListCommand(ctx);
-});
-
-bot.command("shop", (ctx) => {
-  const user = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
-  logger.info("cmd", `/shop from chat:${ctx.chat.id} user:${user}`);
-  return handleShopCommand(ctx);
-});
-
-bot.command("clear", (ctx) => {
-  const user = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
-  logger.info("cmd", `/clear from chat:${ctx.chat.id} user:${user}`);
-  return handleClearCommand(ctx);
-});
-
-// --- Callback queries (inline button presses) ---
+// --- Callback queries (all button presses) ---
 
 bot.on("callback_query:data", (ctx) => {
   logger.debug("callback", `chat:${ctx.chat?.id} data="${ctx.callbackQuery.data}"`);
   return handleCallbackQuery(ctx);
 });
 
-// --- Text messages ---
+// --- Text messages (only processed when awaiting list input) ---
 
 bot.on("message:text", async (ctx) => {
   const chatId = ctx.chat.id;
-  const awaiting = isAwaitingList(chatId);
 
-  logger.debug("text", `chat:${chatId} awaiting=${awaiting} text="${ctx.message.text.slice(0, 80)}"`);
-
-  if (awaiting) {
+  if (isAwaitingList(chatId)) {
+    logger.debug("text", `chat:${chatId} list input: "${ctx.message.text.slice(0, 80)}"`);
     await handleListInput(ctx);
     return;
   }
 
-  // Ignore unrecognized text for now
+  // Ignore unrecognized text
 });
 
 // --- Error handling ---
