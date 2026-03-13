@@ -1,17 +1,16 @@
 import type { Api } from "grammy";
 import { clearList, compactList, getActiveList, getVisibleItems } from "../db.js";
-import { renderShoppingStatus, renderIdleStatus, escapeMarkdown } from "../render.js";
+import { renderShoppingStatus, renderIdleStatus } from "../render.js";
 import { editStatusMessage, deleteMessages } from "../status.js";
 import { logger } from "../logger.js";
 import type { Context } from "grammy";
 
 // --- Auto-reset timers (in-memory, lost on restart) ---
 
-const AUTO_RESET_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+const AUTO_RESET_DELAY_MS = 30 * 1000; // 30 seconds
 
 interface PendingReset {
   timeout: NodeJS.Timeout;
-  confirmMsgId?: number;
 }
 
 const pendingResets = new Map<number, PendingReset>();
@@ -26,8 +25,8 @@ export function cancelAutoReset(chatId: number): void {
   }
 }
 
-/** Schedule silent auto-reset: deletes all Telegram messages and soft-deletes the list. */
-export function scheduleAutoReset(chatId: number, api: Api, confirmMsgId?: number): void {
+/** Schedule silent auto-reset: deletes all item messages and soft-deletes the list. */
+export function scheduleAutoReset(chatId: number, api: Api): void {
   cancelAutoReset(chatId);
 
   const timeout = setTimeout(async () => {
@@ -35,19 +34,16 @@ export function scheduleAutoReset(chatId: number, api: Api, confirmMsgId?: numbe
     logger.info("compact", `chat:${chatId} auto-reset triggered`);
 
     const result = clearList(chatId);
-    const allMsgIds = [...result.itemMsgIds];
-    if (confirmMsgId) allMsgIds.push(confirmMsgId);
-
-    await deleteMessages(api, chatId, allMsgIds);
+    await deleteMessages(api, chatId, result.itemMsgIds);
 
     // Edit status message back to IDLE
     const status = renderIdleStatus();
     await editStatusMessage(api, chatId, status.text, status.keyboard);
 
-    logger.info("compact", `chat:${chatId} auto-reset complete, deleted ${allMsgIds.length} messages`);
+    logger.info("compact", `chat:${chatId} auto-reset complete, deleted ${result.itemMsgIds.length} messages`);
   }, AUTO_RESET_DELAY_MS);
 
-  pendingResets.set(chatId, { timeout, confirmMsgId });
+  pendingResets.set(chatId, { timeout });
   logger.debug("compact", `chat:${chatId} auto-reset scheduled in ${AUTO_RESET_DELAY_MS / 1000}s`);
 }
 
@@ -77,14 +73,9 @@ export async function handleCompact(ctx: Context): Promise<void> {
   }
 
   if (result.allComplete) {
-    // All items done — keep messages visible, schedule auto-reset
+    // All items done — silently schedule auto-reset
     logger.info("compact", `chat:${chatId} all items complete, scheduling auto-reset`);
-    const confirmMsg = await ctx.api.sendMessage(
-      chatId,
-      escapeMarkdown("All done! List will auto-clear in 5 minutes."),
-      { parse_mode: "MarkdownV2" },
-    );
-    scheduleAutoReset(chatId, ctx.api, confirmMsg.message_id);
+    scheduleAutoReset(chatId, ctx.api);
     await ctx.answerCallbackQuery();
     return;
   }

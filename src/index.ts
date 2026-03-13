@@ -2,11 +2,12 @@ import "dotenv/config";
 import { Bot } from "grammy";
 
 import { logger } from "./logger.js";
-import { getActiveList } from "./db.js";
+import { getActiveList, getVisibleItems } from "./db.js";
 import { renderIdleStatus, renderNormalStatus } from "./render.js";
 import { sendStatusMessage } from "./status.js";
 import { handleCallbackQuery } from "./handlers/callback.js";
 import { isAwaitingList, handleListInput } from "./handlers/list.js";
+import { isAwaitingAdd, handleAddItemsInput } from "./handlers/edit.js";
 
 const token = process.env.BOT_TOKEN;
 if (!token) {
@@ -24,8 +25,9 @@ bot.command("start", async (ctx) => {
 
   const data = getActiveList(chatId);
   if (data) {
-    // List exists — show NORMAL state
-    const status = renderNormalStatus(data.items.length);
+    // List exists — show NORMAL state with all visible items
+    const visibleItems = getVisibleItems(data.list.id);
+    const status = renderNormalStatus(visibleItems);
     await sendStatusMessage(ctx.api, chatId, status.text, status.keyboard);
   } else {
     // No list — show IDLE state
@@ -49,6 +51,12 @@ bot.on("message:text", async (ctx) => {
   if (isAwaitingList(chatId)) {
     logger.debug("text", `chat:${chatId} list input: "${ctx.message.text.slice(0, 80)}"`);
     await handleListInput(ctx);
+    return;
+  }
+
+  if (isAwaitingAdd(chatId)) {
+    logger.debug("text", `chat:${chatId} add-items input: "${ctx.message.text.slice(0, 80)}"`);
+    await handleAddItemsInput(ctx);
     return;
   }
 

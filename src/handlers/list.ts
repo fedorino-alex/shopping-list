@@ -1,5 +1,5 @@
 import type { Context } from "grammy";
-import { createList, getActiveList } from "../db.js";
+import { createList, getActiveList, getVisibleItems } from "../db.js";
 import { renderAwaitingStatus, renderNormalStatus } from "../render.js";
 import { editStatusMessage } from "../status.js";
 import { logger } from "../logger.js";
@@ -60,6 +60,7 @@ export async function handleListInput(ctx: Context): Promise<void> {
   logger.info("list", `chat:${chatId} created list #${listId} with ${items.length} items: [${items.join(", ")}]`);
 
   // Move to NORMAL state
-  const status = renderNormalStatus(items.length);
+  const visibleItems = getVisibleItems(listId);
+  const status = renderNormalStatus(visibleItems);
   await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
 }

@@ -1,7 +1,8 @@
 import type { Context } from "grammy";
-import { getActiveList, getVisibleItems, updateItemMsgId } from "../db.js";
-import { renderShoppingStatus, renderItemText, renderItemKeyboard } from "../render.js";
-import { editStatusMessage } from "../status.js";
+import { getActiveList, getVisibleItems, updateItemMsgId, compactList } from "../db.js";
+import { renderShoppingStatus, renderItemText, renderItemKeyboard, renderNormalStatus } from "../render.js";
+import { editStatusMessage, deleteMessages } from "../status.js";
+import { cancelAutoReset } from "./compact.js";
 import { logger } from "../logger.js";
 
 /** Called when user taps [Start Shopping] button */
@@ -44,6 +45,41 @@ export async function handleStartShopping(ctx: Context): Promise<void> {
       logger.error("shop", `chat:${chatId} failed to send item #${item.id} "${item.name}"`, err);
     }
   }
+
+  await ctx.answerCallbackQuery();
+}
+
+/** Called when user taps [Finish] — compact completed items silently, return to NORMAL with remaining */
+export async function handleFinishShopping(ctx: Context): Promise<void> {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
+
+  cancelAutoReset(chatId);
+
+  const data = getActiveList(chatId);
+  if (!data) {
+    await ctx.answerCallbackQuery({ text: "No active list" });
+    return;
+  }
+
+  // Collect all visible item message_ids before compacting
+  const visibleItems = getVisibleItems(data.list.id);
+  const allMsgIds = visibleItems
+    .map((i) => i.message_id)
+    .filter((id): id is number => id !== null);
+
+  // Compact: soft-delete all completed items
+  compactList(chatId);
+
+  // Delete all item messages from chat
+  await deleteMessages(ctx.api, chatId, allMsgIds);
+
+  // Return to NORMAL with remaining (incomplete) items — ready for the next store
+  const remainingItems = getVisibleItems(data.list.id);
+  logger.info("shop", `chat:${chatId} finished shopping, ${remainingItems.length} items remaining`);
+
+  const status = renderNormalStatus(remainingItems);
+  await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
 
   await ctx.answerCallbackQuery();
 }

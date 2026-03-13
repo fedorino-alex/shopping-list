@@ -1,12 +1,13 @@
 import type { Context } from "grammy";
 import { toggleItem, getActiveList, getVisibleItems } from "../db.js";
-import { renderItemText, renderItemKeyboard, renderShoppingStatus, escapeMarkdown } from "../render.js";
+import { renderItemText, renderItemKeyboard, renderShoppingStatus } from "../render.js";
 import { editStatusMessage } from "../status.js";
 import { logger } from "../logger.js";
 import { handleNewList } from "./list.js";
-import { handleStartShopping } from "./shop.js";
+import { handleStartShopping, handleFinishShopping } from "./shop.js";
 import { handleClearList } from "./clear.js";
 import { handleCompact, scheduleAutoReset, cancelAutoReset } from "./compact.js";
+import { handleEditList, handleDoneEditing, handleAddItems, handleRemoveItem } from "./edit.js";
 
 /** Routes all callback queries to the appropriate handler. */
 export async function handleCallbackQuery(ctx: Context): Promise<void> {
@@ -31,11 +32,29 @@ export async function handleCallbackQuery(ctx: Context): Promise<void> {
   if (data === "action:compact") {
     return handleCompact(ctx);
   }
+  if (data === "action:finish_shopping") {
+    return handleFinishShopping(ctx);
+  }
+  if (data === "action:edit_list") {
+    return handleEditList(ctx);
+  }
+  if (data === "action:done_editing") {
+    return handleDoneEditing(ctx);
+  }
+  if (data === "action:add_items") {
+    return handleAddItems(ctx);
+  }
 
   // Route toggle callbacks
   const match = data.match(/^toggle:(\d+)$/);
   if (match) {
     return handleToggle(ctx, chatId, parseInt(match[1], 10));
+  }
+
+  // Route remove callbacks
+  const removeMatch = data.match(/^remove:(\d+)$/);
+  if (removeMatch) {
+    return handleRemoveItem(ctx, chatId, parseInt(removeMatch[1], 10));
   }
 
   logger.error("callback", `chat:${chatId} unknown callback data: "${data}"`);
@@ -77,12 +96,7 @@ async function handleToggle(ctx: Context, chatId: number, itemId: number): Promi
     // Check if all visible items are now complete — schedule auto-reset
     if (visibleItems.length > 0 && visibleItems.every((i) => i.complete)) {
       logger.info("callback", `chat:${chatId} all visible items complete, scheduling auto-reset`);
-      const confirmMsg = await ctx.api.sendMessage(
-        chatId,
-        escapeMarkdown("All done! List will auto-clear in 5 minutes."),
-        { parse_mode: "MarkdownV2" },
-      );
-      scheduleAutoReset(chatId, ctx.api, confirmMsg.message_id);
+      scheduleAutoReset(chatId, ctx.api);
     } else {
       // Not all complete — cancel any pending auto-reset (e.g. user tapped Undo)
       cancelAutoReset(chatId);

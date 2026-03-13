@@ -137,6 +137,10 @@ const stmtGetItem = db.prepare(
   `SELECT * FROM items WHERE id = ?`
 );
 
+const stmtHideItem = db.prepare(
+  `UPDATE items SET hidden = 1 WHERE id = ?`
+);
+
 // --- Public API: Chats ---
 
 export function getChat(chatId: number): ChatRow {
@@ -234,4 +238,33 @@ export function toggleItem(itemId: number): ItemRow | null {
 
 export function getItem(itemId: number): ItemRow | null {
   return stmtGetItem.get(itemId) as ItemRow | null;
+}
+
+/**
+ * Soft-delete a single item (sets hidden = 1).
+ * Returns the item row (with its message_id) so the caller can delete the Telegram message,
+ * or null if the item does not exist.
+ */
+export function removeItem(itemId: number): ItemRow | null {
+  const item = stmtGetItem.get(itemId) as ItemRow | null;
+  if (!item) return null;
+  stmtHideItem.run(itemId);
+  return item;
+}
+
+/**
+ * Append new items to an existing list.
+ * Returns the newly created ItemRow objects (no message_id yet).
+ */
+export function addItemsToList(listId: number, chatId: number, names: string[]): ItemRow[] {
+  const newItems: ItemRow[] = [];
+  const insertMany = db.transaction((ns: string[]) => {
+    for (const name of ns) {
+      const result = stmtInsertItem.run(listId, chatId, name.trim());
+      const item = db.prepare(`SELECT * FROM items WHERE id = ?`).get(result.lastInsertRowid) as ItemRow;
+      newItems.push(item);
+    }
+  });
+  insertMany(names);
+  return newItems;
 }
