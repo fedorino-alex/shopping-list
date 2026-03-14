@@ -16,7 +16,7 @@ export async function handleClearList(ctx: Context): Promise<void> {
   const { count, itemMsgIds } = clearList(chatId);
 
   if (count === 0) {
-    await ctx.answerCallbackQuery({ text: "No active list" });
+    await ctx.answerCallbackQuery({ text: "Нет активного списка" });
     return;
   }
 

@@ -1,5 +1,10 @@
 # API Reference
 
+## src/extractor.ts
+
+| Function                      | Returns           | Description                                          |
+|-------------------------------|-------------------|------------------------------------------------------|
+| `extractItems(text)`          | `Promise<string[]>` | Extract grocery item names from free-form text. Uses Gemini Flash if `GEMINI_API_KEY` is set; otherwise falls back to heuristic splitting on `,` `\n` `;` `-` `•`. Strips quantities, units, and numbering. Preserves input language (Russian, English, etc.). |
 ## src/status.ts
 
 | Function                | Description                                                         |

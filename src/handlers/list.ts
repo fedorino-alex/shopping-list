@@ -2,6 +2,7 @@ import type { Context } from "grammy";
 import { createList, getActiveList, getVisibleItems } from "../db.js";
 import { renderAwaitingStatus, renderNormalStatus } from "../render.js";
 import { editStatusMessage } from "../status.js";
+import { extractItems } from "../extractor.js";
 import { logger } from "../logger.js";
 
 // Chat IDs that are waiting for the user to send a list of items
@@ -32,10 +33,7 @@ export async function handleListInput(ctx: Context): Promise<void> {
 
   awaitingList.delete(chatId);
 
-  const items = text
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const items = await extractItems(text);
 
   if (items.length === 0) {
     logger.debug("list", `chat:${chatId} sent empty list`);

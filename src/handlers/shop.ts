@@ -12,7 +12,7 @@ export async function handleStartShopping(ctx: Context): Promise<void> {
 
   const data = getActiveList(chatId);
   if (!data) {
-    await ctx.answerCallbackQuery({ text: "No active list" });
+    await ctx.answerCallbackQuery({ text: "Нет активного списка" });
     return;
   }
 
@@ -20,7 +20,7 @@ export async function handleStartShopping(ctx: Context): Promise<void> {
   const visibleItems = getVisibleItems(list.id);
 
   if (visibleItems.length === 0) {
-    await ctx.answerCallbackQuery({ text: "No items in list" });
+    await ctx.answerCallbackQuery({ text: "Список пуст" });
     return;
   }
 
@@ -58,7 +58,7 @@ export async function handleFinishShopping(ctx: Context): Promise<void> {
 
   const data = getActiveList(chatId);
   if (!data) {
-    await ctx.answerCallbackQuery({ text: "No active list" });
+    await ctx.answerCallbackQuery({ text: "Нет активного списка" });
     return;
   }
 

@@ -58,7 +58,7 @@ export async function handleCallbackQuery(ctx: Context): Promise<void> {
   }
 
   logger.error("callback", `chat:${chatId} unknown callback data: "${data}"`);
-  await ctx.answerCallbackQuery({ text: "Unknown action" });
+  await ctx.answerCallbackQuery({ text: "Неизвестное действие" });
 }
 
 /** Handles a toggle:<item_id> callback — flips complete state, edits message, updates header. */
@@ -66,7 +66,7 @@ async function handleToggle(ctx: Context, chatId: number, itemId: number): Promi
   const item = toggleItem(itemId);
   if (!item) {
     logger.error("callback", `chat:${chatId} item #${itemId} not found`);
-    await ctx.answerCallbackQuery({ text: "Item not found" });
+    await ctx.answerCallbackQuery({ text: "Товар не найден" });
     return;
   }
 

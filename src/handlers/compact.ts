@@ -56,19 +56,19 @@ export async function handleCompact(ctx: Context): Promise<void> {
 
   const data = getActiveList(chatId);
   if (!data) {
-    await ctx.answerCallbackQuery({ text: "No active list" });
+    await ctx.answerCallbackQuery({ text: "Нет активного списка" });
     return;
   }
 
   const result = compactList(chatId);
   if (!result) {
-    await ctx.answerCallbackQuery({ text: "No active list" });
+    await ctx.answerCallbackQuery({ text: "Нет активного списка" });
     return;
   }
 
   if (result.hiddenCount === 0 && !result.allComplete) {
     logger.debug("compact", `chat:${chatId} nothing to compact`);
-    await ctx.answerCallbackQuery({ text: "Nothing to compact" });
+    await ctx.answerCallbackQuery({ text: "Нечего скрывать" });
     return;
   }
 

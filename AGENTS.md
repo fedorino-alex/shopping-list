@@ -9,6 +9,7 @@
   - [`.agents/database.md`](.agents/database.md) — SQL schema, DB public API
   - [`.agents/api-reference.md`](.agents/api-reference.md) — render.ts, status.ts, and handler utility functions
   - [`.agents/code-style.md`](.agents/code-style.md) — Code style guidelines, key design decisions
+  - [`.agents/supermarket-sections.md`](.agents/supermarket-sections.md) — Full department/product list used to inform the LLM extraction prompt
 - Update the relevant `.agents/` file first, then update the summary here if needed.
 - Use Mermaid diagrams (` ```mermaid `) in `.agents/` docs — not ASCII art.
 
@@ -16,11 +17,11 @@
 
 A Telegram bot for family shopping list management with a **fully button-driven UI**.
 A single persistent **status message** drives all state transitions via inline keyboard buttons.
-Users send comma-separated items as text; all other interactions are button-driven.
+Users send free-form text (items, recipes, any language); all other interactions are button-driven.
 Each shopping list item is a separate Telegram message with its own inline button.
 
 States: `IDLE → AWAITING_INPUT → NORMAL ⇄ SHOPPING`, plus `EDITING` and `AWAITING_ADD`
-reachable from NORMAL and SHOPPING. See [`.agents/state-machine.md`](.agents/state-machine.md).
+reachable from NORMAL only. See [`.agents/state-machine.md`](.agents/state-machine.md).
 
 ## Tech Stack
 
@@ -41,13 +42,15 @@ shopping-list/
   .env                    # BOT_TOKEN, LOG_LEVEL (never committed)
   AGENTS.md               # This file — quick-reference index
   .agents/                # Detailed documentation sections
-    state-machine.md      # States, transitions, callback data, UI reference
-    database.md           # Schema + DB API
-    api-reference.md      # render.ts / status.ts / handler utility functions
-    code-style.md         # Code style guidelines + design decisions
+    state-machine.md          # States, transitions, callback data, UI reference
+    database.md               # Schema + DB API
+    api-reference.md          # render.ts / status.ts / handler utility functions
+    code-style.md             # Code style guidelines + design decisions
+    supermarket-sections.md   # All supermarket departments + products (informs LLM prompt)
   src/
     index.ts              # Entry point: /start, callback routing, text routing
     db.ts                 # SQLite: chats/lists/items tables, all CRUD, soft deletes
+    extractor.ts          # Free-form text → item names via Groq llama-3.3-70b (heuristic fallback)
     render.ts             # Status + item renderers (all states)
     status.ts             # editStatusMessage, sendStatusMessage, deleteMessages
     logger.ts             # Structured logger: debug/info/error with timestamps
@@ -74,10 +77,11 @@ npx vitest run                     # Run tests (when added)
 
 ## Environment Variables
 
-| Variable    | Required | Default | Description                        |
-|-------------|----------|---------|------------------------------------|
-| `BOT_TOKEN` | Yes      | —       | Telegram bot token from @BotFather |
-| `LOG_LEVEL` | No       | `debug` | `debug`, `info`, or `error`        |
+| Variable         | Required | Default | Description                                                              |
+|------------------|----------|---------|--------------------------------------------------------------------------|
+| `BOT_TOKEN`      | Yes      | —       | Telegram bot token from @BotFather                                       |
+| `GROQ_API_KEY`   | No       | —       | Groq API key for free-form item extraction (llama-3.3-70b); heuristic fallback used if absent |
+| `LOG_LEVEL`      | No       | `debug` | `debug`, `info`, or `error`                                              |
 
 ## Bot Commands
 

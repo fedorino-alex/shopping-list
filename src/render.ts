@@ -8,36 +8,46 @@ export function escapeMarkdown(text: string): string {
   return text.replace(SPECIAL_CHARS, "\\$&");
 }
 
+// --- Russian plural helper ---
+
+function pluralItems(count: number): string {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod100 >= 11 && mod100 <= 14) return `${count} товаров`;
+  if (mod10 === 1) return `${count} товар`;
+  if (mod10 >= 2 && mod10 <= 4) return `${count} товара`;
+  return `${count} товаров`;
+}
+
 // --- Status message renderers (one persistent message, edited per state) ---
 
 /** IDLE state: no active list */
 export function renderIdleStatus(): { text: string; keyboard: InlineKeyboard } {
   return {
-    text: escapeMarkdown("No active shopping list."),
-    keyboard: new InlineKeyboard().text("📝 New List", "action:new_list"),
+    text: escapeMarkdown("Список покупок пуст."),
+    keyboard: new InlineKeyboard().text("📝 Новый список", "action:new_list"),
   };
 }
 
-/** AWAITING_INPUT state: waiting for comma-separated items */
+/** AWAITING_INPUT state: waiting for free-form input */
 export function renderAwaitingStatus(): { text: string; keyboard?: undefined } {
   return {
-    text: escapeMarkdown("Send me a comma-separated list of items to buy."),
+    text: escapeMarkdown("Отправьте список покупок — можно в любой форме: перечислением, рецептом, текстом."),
   };
 }
 
 /** NORMAL state: list exists, not shopping — shows all items then a summary line */
 export function renderNormalStatus(items: ItemRow[]): { text: string; keyboard: InlineKeyboard } {
-  const count = items.length;
   const lines = items.map((i) => escapeMarkdown(`• ${i.name}`));
   if (lines.length > 0) lines.push(""); // blank line before summary
-  lines.push(escapeMarkdown(`🛒 ${count} item${count !== 1 ? "s" : ""}`));
+  lines.push(escapeMarkdown(`🛒 ${pluralItems(items.length)}`));
   return {
     text: lines.join("\n"),
     keyboard: new InlineKeyboard()
-      .text("🛍 Start Shopping", "action:start_shopping")
-      .text("🗑 Clear List", "action:clear_list")
+      .text("🛍 Начать покупки", "action:start_shopping")
+      .text("🗑 Очистить", "action:clear_list")
       .row()
-      .text("✏️ Edit List", "action:edit_list"),
+      .text("✏️ Изменить список", "action:edit_list"),
   };
 }
 
@@ -46,29 +56,27 @@ export function renderShoppingStatus(items: ItemRow[]): { text: string; keyboard
   const completeCount = items.filter((i) => i.complete).length;
   const total = items.length;
   return {
-    text: escapeMarkdown(`🛍 Shopping (${completeCount}/${total} done)`),
+    text: escapeMarkdown(`🛍 Покупки (${completeCount}/${total} куплено)`),
     keyboard: new InlineKeyboard()
-      .text("🧹 Compact", "action:compact")
-      .text("✅ Finish", "action:finish_shopping")
-      .row()
-      .text("✏️ Edit List", "action:edit_list"),
+      .text("🧹 Скрыть купленное", "action:compact")
+      .text("🏁 Завершить", "action:finish_shopping"),
   };
 }
 
 /** EDITING state: status header while editing the list */
 export function renderEditingStatus(itemCount: number): { text: string; keyboard: InlineKeyboard } {
   return {
-    text: escapeMarkdown(`✏️ Editing: ${itemCount} item${itemCount !== 1 ? "s" : ""}`),
+    text: escapeMarkdown(`✏️ Редактирование: ${pluralItems(itemCount)}`),
     keyboard: new InlineKeyboard()
-      .text("➕ Add Items", "action:add_items")
-      .text("✅ Done", "action:done_editing"),
+      .text("➕ Добавить", "action:add_items")
+      .text("💾 Готово", "action:done_editing"),
   };
 }
 
 /** AWAITING_ADD sub-state: waiting for user to send items to add */
 export function renderAwaitingAddStatus(): { text: string } {
   return {
-    text: escapeMarkdown("➕ Send items to add (comma-separated)."),
+    text: escapeMarkdown("➕ Отправьте товары для добавления."),
   };
 }
 
@@ -87,11 +95,11 @@ export function renderItemText(item: ItemRow): string {
 }
 
 export function renderItemKeyboard(item: ItemRow): InlineKeyboard {
-  const label = item.complete ? "↩️ Undo" : "✅ Done";
+  const label = item.complete ? "↩️ Вернуть" : "🪙 Куплено";
   return new InlineKeyboard().text(label, `toggle:${item.id}`);
 }
 
 /** Keyboard shown on each item message while in EDITING state */
 export function renderItemRemoveKeyboard(item: ItemRow): InlineKeyboard {
-  return new InlineKeyboard().text("🗑 Remove", `remove:${item.id}`);
+  return new InlineKeyboard().text("🗑 Удалить", `remove:${item.id}`);
 }

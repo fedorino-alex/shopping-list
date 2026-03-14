@@ -11,20 +11,17 @@ import {
   renderAwaitingAddStatus,
   renderNormalStatus,
   renderItemText,
-  renderItemKeyboard,
   renderItemRemoveKeyboard,
-  renderShoppingStatus,
 } from "../render.js";
 import { editStatusMessage, deleteMessages } from "../status.js";
-import { cancelAutoReset, scheduleAutoReset } from "./compact.js";
+import { cancelAutoReset } from "./compact.js";
+import { extractItems } from "../extractor.js";
 import { logger } from "../logger.js";
 
 // -- In-memory state --
 
-type EditOrigin = "normal" | "shopping";
-
-/** Tracks which state the user was in before entering EDITING */
-const editOrigin = new Map<number, EditOrigin>();
+/** Chat IDs currently in EDITING state */
+const editingChats = new Set<number>();
 
 /** Chat IDs that are waiting for the user to send items to add */
 const awaitingAdd = new Set<number>();
@@ -34,132 +31,84 @@ export function isAwaitingAdd(chatId: number): boolean {
 }
 
 export function isEditingList(chatId: number): boolean {
-  return editOrigin.has(chatId);
+  return editingChats.has(chatId);
 }
 
 /** Called by other handlers when the list is cleared or a new list is created,
  *  to clean up any stale edit state. */
 export function cancelEditState(chatId: number): void {
-  editOrigin.delete(chatId);
+  editingChats.delete(chatId);
   awaitingAdd.delete(chatId);
 }
 
 // -- Handlers --
 
-/** Called when user taps [Edit List] button (from NORMAL or SHOPPING state) */
+/** Called when user taps [✏️ Изменить список] button (from NORMAL state) */
 export async function handleEditList(ctx: Context): Promise<void> {
   const chatId = ctx.chat?.id;
   if (!chatId) return;
 
   const data = getActiveList(chatId);
   if (!data) {
-    await ctx.answerCallbackQuery({ text: "No active list" });
+    await ctx.answerCallbackQuery({ text: "Нет активного списка" });
     return;
   }
 
   const visibleItems = getVisibleItems(data.list.id);
 
-  // Determine origin: if any visible item already has a message_id it was sent
-  // during Start Shopping, so we came from SHOPPING. Otherwise NORMAL.
-  const origin: EditOrigin = visibleItems.some((i) => i.message_id !== null)
-    ? "shopping"
-    : "normal";
-
-  editOrigin.set(chatId, origin);
   awaitingAdd.delete(chatId); // clear any stale add-awaiting state
-
-  // Cancel any pending auto-reset (e.g. user editing after all items done)
+  editingChats.add(chatId);
   cancelAutoReset(chatId);
 
-  logger.info("edit", `chat:${chatId} entering EDITING from ${origin}, ${visibleItems.length} visible items`);
+  logger.info("edit", `chat:${chatId} entering EDITING, ${visibleItems.length} visible items`);
 
   // Update status message to EDITING
   const status = renderEditingStatus(visibleItems.length);
   await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
 
-  if (origin === "normal") {
-    // Items have no Telegram messages yet — send one per item with [Remove] keyboard
-    for (const item of visibleItems) {
-      try {
-        const msg = await ctx.api.sendMessage(chatId, renderItemText(item), {
-          parse_mode: "MarkdownV2",
-          reply_markup: renderItemRemoveKeyboard(item),
-          disable_notification: true,
-        });
-        updateItemMsgId(item.id, msg.message_id);
-        logger.debug("edit", `chat:${chatId} item #${item.id} sent as msg:${msg.message_id}`);
-      } catch (err) {
-        logger.error("edit", `chat:${chatId} failed to send item #${item.id}`, err);
-      }
-    }
-  } else {
-    // Items already have Telegram messages from Start Shopping — swap to [Remove] keyboard
-    for (const item of visibleItems) {
-      if (!item.message_id) continue;
-      try {
-        await ctx.api.editMessageReplyMarkup(chatId, item.message_id, {
-          reply_markup: renderItemRemoveKeyboard(item),
-        });
-      } catch (err) {
-        logger.error("edit", `chat:${chatId} failed to edit keyboard for item #${item.id}`, err);
-      }
+  // Send one message per item with [🗑 Удалить] keyboard
+  for (const item of visibleItems) {
+    try {
+      const msg = await ctx.api.sendMessage(chatId, renderItemText(item), {
+        parse_mode: "MarkdownV2",
+        reply_markup: renderItemRemoveKeyboard(item),
+        disable_notification: true,
+      });
+      updateItemMsgId(item.id, msg.message_id);
+      logger.debug("edit", `chat:${chatId} item #${item.id} sent as msg:${msg.message_id}`);
+    } catch (err) {
+      logger.error("edit", `chat:${chatId} failed to send item #${item.id}`, err);
     }
   }
 
   await ctx.answerCallbackQuery();
 }
 
-/** Called when user taps [Done Editing] button */
+/** Called when user taps [💾 Готово] button */
 export async function handleDoneEditing(ctx: Context): Promise<void> {
   const chatId = ctx.chat?.id;
   if (!chatId) return;
 
-  const origin = editOrigin.get(chatId) ?? "normal";
-  editOrigin.delete(chatId);
   awaitingAdd.delete(chatId);
+  editingChats.delete(chatId);
 
   const data = getActiveList(chatId);
   if (!data) {
-    await ctx.answerCallbackQuery({ text: "No active list" });
+    await ctx.answerCallbackQuery({ text: "Нет активного списка" });
     return;
   }
 
   const visibleItems = getVisibleItems(data.list.id);
-  logger.info("edit", `chat:${chatId} done editing (origin:${origin}), ${visibleItems.length} visible items`);
+  logger.info("edit", `chat:${chatId} done editing, ${visibleItems.length} visible items`);
 
-  if (origin === "normal") {
-    // Delete the per-item messages we sent during EDITING, then show NORMAL status
-    const msgIds = visibleItems
-      .map((i) => i.message_id)
-      .filter((id): id is number => id !== null);
-    await deleteMessages(ctx.api, chatId, msgIds);
+  // Delete the per-item messages we sent during EDITING, then show NORMAL status
+  const msgIds = visibleItems
+    .map((i) => i.message_id)
+    .filter((id): id is number => id !== null);
+  await deleteMessages(ctx.api, chatId, msgIds);
 
-    const status = renderNormalStatus(visibleItems);
-    await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
-  } else {
-    // Restore Done/Undo keyboards on each visible item message
-    for (const item of visibleItems) {
-      if (!item.message_id) continue;
-      try {
-        await ctx.api.editMessageText(chatId, item.message_id, renderItemText(item), {
-          parse_mode: "MarkdownV2",
-          reply_markup: renderItemKeyboard(item),
-        });
-      } catch (err) {
-        logger.error("edit", `chat:${chatId} failed to restore keyboard for item #${item.id}`, err);
-      }
-    }
-
-    // Return to SHOPPING status
-    const status = renderShoppingStatus(visibleItems);
-    await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
-
-    // Re-check if all visible items are complete (e.g. user removed remaining incomplete items)
-    if (visibleItems.length > 0 && visibleItems.every((i) => i.complete)) {
-      logger.info("edit", `chat:${chatId} all visible items complete after editing, scheduling auto-reset`);
-      scheduleAutoReset(chatId, ctx.api);
-    }
-  }
+  const status = renderNormalStatus(visibleItems);
+  await editStatusMessage(ctx.api, chatId, status.text, status.keyboard);
 
   await ctx.answerCallbackQuery();
 }
@@ -169,7 +118,7 @@ export async function handleRemoveItem(ctx: Context, chatId: number, itemId: num
   const item = removeItem(itemId);
   if (!item) {
     logger.error("edit", `chat:${chatId} item #${itemId} not found for removal`);
-    await ctx.answerCallbackQuery({ text: "Item not found" });
+    await ctx.answerCallbackQuery({ text: "Товар не найден" });
     return;
   }
 
@@ -214,10 +163,7 @@ export async function handleAddItemsInput(ctx: Context): Promise<void> {
 
   awaitingAdd.delete(chatId);
 
-  const names = text
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const names = await extractItems(text);
 
   if (names.length === 0) {
     // Stay in awaiting-add state
