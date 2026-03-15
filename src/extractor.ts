@@ -21,7 +21,8 @@ export type NLCommandStep =
   | { intent: 'remove'; query: string }
   | { intent: 'show' }
   | { intent: 'start_shopping' }
-  | { intent: 'unknown' };
+  | { intent: 'unknown' }
+  | { intent: 'rate_limited' };
 
 /** @deprecated Use NLCommandStep */
 export type NLCommand = NLCommandStep;
@@ -119,6 +120,10 @@ export async function classifyAndExtract(text: string, state: BotState): Promise
       }),
     });
 
+    if (res.status === 429) {
+      logger.debug("extractor", "Groq rate limit (429) — returning rate_limited");
+      return [{ intent: "rate_limited" }];
+    }
     if (!res.ok) throw new Error(`Groq API error: ${res.status} ${res.statusText}`);
 
     const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };

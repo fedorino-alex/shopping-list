@@ -66,6 +66,25 @@ export async function handleNLCommand(ctx: Context, text: string): Promise<void>
     case "unknown":
       await workflow.replyUnknown(ctx, state);
       break;
+
+    case "rate_limited": {
+      const rateLimitedReplies = [
+        "🧠 Мой мозг сегодня закончился — слишком много думал. Попробуй через минутку!",
+        "🪫 Разрядился. Иду на подзарядку, вернусь через минуту.",
+        "😵‍💫 Слишком много списков на сегодня, голова кругом. Чуть позже, ладно?",
+        "☕️ Ушёл пить кофе — думал слишком интенсивно. Загляни через минутку.",
+        "🐢 Groq говорит «стоп» — думаю слишком быстро для них. Попробуй через минуту.",
+        "💤 Перегрелся и ушёл в спячку. Буди через минуту.",
+        "🤯 Перемыслил на сегодня. Дай мозгу остыть — минуту-другую.",
+      ];
+      const reply = rateLimitedReplies[Math.floor(Math.random() * rateLimitedReplies.length)];
+      await ctx.reply(reply, {
+        ...(ctx.message?.message_id
+          ? { reply_parameters: { message_id: ctx.message.message_id } }
+          : {}),
+      });
+      break;
+    }
   }
 }
 
