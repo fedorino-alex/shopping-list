@@ -1,9 +1,9 @@
 import Database from "better-sqlite3";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import type { ExtractedItem } from "./extractor.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = path.join(__dirname, "..", "shopping-list.db");
+const dbPath = process.env.DB_PATH ??
+  path.join(process.cwd(), "..", "database", "shopping-list.db");
 
 const db = new Database(dbPath);
 
@@ -31,12 +31,41 @@ db.exec(`
     list_id     INTEGER NOT NULL REFERENCES lists(id),
     chat_id     INTEGER NOT NULL,
     message_id  INTEGER,
-    name        TEXT NOT NULL,
+    code        TEXT NOT NULL,
+    details     TEXT,
+    "group"     TEXT NOT NULL DEFAULT '',
     complete    INTEGER DEFAULT 0,
     hidden      INTEGER DEFAULT 0,
     created_at  TEXT DEFAULT (datetime('now'))
   );
 `);
+
+// Migrate items table: replace name→code, add details (one-time migration for older DBs)
+{
+  const itemCols = (db.pragma('table_info(items)') as { name: string }[]).map((r) => r.name);
+  if (!itemCols.includes('code')) {
+    const hasGroup = itemCols.includes('group');
+    const groupCols = hasGroup ? ', "group"' : '';
+    db.exec(`
+      ALTER TABLE items RENAME TO items_old;
+      CREATE TABLE items (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        list_id     INTEGER NOT NULL REFERENCES lists(id),
+        chat_id     INTEGER NOT NULL,
+        message_id  INTEGER,
+        code        TEXT NOT NULL,
+        details     TEXT,
+        "group"     TEXT NOT NULL DEFAULT '',
+        complete    INTEGER DEFAULT 0,
+        hidden      INTEGER DEFAULT 0,
+        created_at  TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO items (id, list_id, chat_id, message_id, code${groupCols}, complete, hidden, created_at)
+      SELECT id, list_id, chat_id, message_id, name${groupCols}, complete, hidden, created_at FROM items_old;
+      DROP TABLE items_old;
+    `);
+  }
+}
 
 // --- Types ---
 
@@ -57,7 +86,9 @@ export interface ItemRow {
   list_id: number;
   chat_id: number;
   message_id: number | null;
-  name: string;
+  code: string;
+  details: string | null;
+  group: string;
   complete: number;
   hidden: number;
   created_at: string;
@@ -70,8 +101,9 @@ export interface ClearResult {
 
 export interface CompactResult {
   hiddenCount: number;
-  hiddenMsgIds: number[];
   allComplete: boolean;
+  deletedMsgIds: number[];  // group messages where all items are done — delete the Telegram message
+  updatedGroups: { msgId: number; groupName: string }[]; // groups with remaining items — re-render
 }
 
 // --- Prepared statements ---
@@ -94,7 +126,7 @@ const stmtInsertList = db.prepare(
 );
 
 const stmtInsertItem = db.prepare(
-  `INSERT INTO items (list_id, chat_id, name) VALUES (?, ?, ?)`
+  `INSERT INTO items (list_id, chat_id, code, details, "group") VALUES (?, ?, ?, ?, ?)`
 );
 
 const stmtGetActiveList = db.prepare(
@@ -125,6 +157,10 @@ const stmtGetCompletedVisibleItems = db.prepare(
   `SELECT * FROM items WHERE list_id = ? AND complete = 1 AND hidden = 0 ORDER BY id ASC`
 );
 
+const stmtGetItemsByGroup = db.prepare(
+  `SELECT * FROM items WHERE list_id = ? AND "group" = ? AND hidden = 0 ORDER BY id ASC`
+);
+
 const stmtUpdateItemMsgId = db.prepare(
   `UPDATE items SET message_id = ? WHERE id = ?`
 );
@@ -153,19 +189,33 @@ export function updateStatusMsgId(chatId: number, msgId: number): void {
   stmtUpdateStatusMsgId.run(msgId, chatId);
 }
 
+/** Clears the stored status_msg_id after the status message has been deleted. */
+export function clearStatusMsgId(chatId: number): void {
+  stmtUpsertChat.run(chatId);
+  stmtUpdateStatusMsgId.run(null, chatId);
+}
+
+/** Returns the stored status_msg_id for a chat, or null if not set / chat unknown. */
+export function getStatusMsgId(chatId: number): number | null {
+  const row = stmtGetChat.get(chatId) as ChatRow | undefined;
+  return row?.status_msg_id ?? null;
+}
+
 // --- Public API: Lists ---
 
-export function createList(chatId: number, itemNames: string[]): number {
+export function createList(chatId: number, groups: { group: string; items: ExtractedItem[] }[]): number {
   const result = stmtInsertList.run(chatId);
   const listId = result.lastInsertRowid as number;
 
-  const insertMany = db.transaction((names: string[]) => {
-    for (const name of names) {
-      stmtInsertItem.run(listId, chatId, name.trim());
+  const insertMany = db.transaction((gs: { group: string; items: ExtractedItem[] }[]) => {
+    for (const g of gs) {
+      for (const item of g.items) {
+        stmtInsertItem.run(listId, chatId, item.code.trim(), item.details?.trim() ?? null, g.group);
+      }
     }
   });
 
-  insertMany(itemNames);
+  insertMany(groups);
   return listId;
 }
 
@@ -202,33 +252,59 @@ export function clearList(chatId: number): ClearResult {
 
 /**
  * Hides completed visible items (sets hidden = 1).
- * Returns their message IDs for deletion from chat, and whether all items are now complete.
+ * Returns per-group results so the caller can delete or re-render each group's Telegram message.
  */
 export function compactList(chatId: number): CompactResult | null {
   const list = stmtGetActiveList.get(chatId) as ListRow | undefined;
   if (!list) return null;
 
   const completedItems = stmtGetCompletedVisibleItems.all(list.id) as ItemRow[];
-  const hiddenMsgIds = completedItems
-    .map((i) => i.message_id)
-    .filter((id): id is number => id !== null);
+  if (completedItems.length === 0) {
+    const visibleAfter = stmtGetVisibleItems.all(list.id) as ItemRow[];
+    return { hiddenCount: 0, allComplete: visibleAfter.length === 0, deletedMsgIds: [], updatedGroups: [] };
+  }
 
   stmtHideCompletedItems.run(list.id);
 
   const visibleAfter = stmtGetVisibleItems.all(list.id) as ItemRow[];
   const allComplete = visibleAfter.length === 0;
 
-  return {
-    hiddenCount: completedItems.length,
-    hiddenMsgIds,
-    allComplete,
-  };
+  // Build a set of unique group message_ids that had completed items
+  const completedGroupMsgIds = new Map<number, string>(); // msgId → groupName
+  for (const item of completedItems) {
+    if (item.message_id !== null) {
+      completedGroupMsgIds.set(item.message_id, item.group || "Разное");
+    }
+  }
+
+  // For each affected group message, decide: delete (no remaining items) or update (some remain)
+  const visibleAfterByMsgId = new Set(
+    visibleAfter.filter((i) => i.message_id !== null).map((i) => i.message_id as number)
+  );
+
+  const deletedMsgIds: number[] = [];
+  const updatedGroups: { msgId: number; groupName: string }[] = [];
+
+  for (const [msgId, groupName] of completedGroupMsgIds) {
+    if (visibleAfterByMsgId.has(msgId)) {
+      updatedGroups.push({ msgId, groupName });
+    } else {
+      deletedMsgIds.push(msgId);
+    }
+  }
+
+  return { hiddenCount: completedItems.length, allComplete, deletedMsgIds, updatedGroups };
 }
 
 // --- Public API: Items ---
 
 export function updateItemMsgId(itemId: number, msgId: number): void {
   stmtUpdateItemMsgId.run(msgId, itemId);
+}
+
+/** All non-hidden items for a given group in a list, ordered by id. */
+export function getItemsByGroup(listId: number, groupName: string): ItemRow[] {
+  return stmtGetItemsByGroup.all(listId, groupName) as ItemRow[];
 }
 
 export function toggleItem(itemId: number): ItemRow | null {
@@ -253,18 +329,30 @@ export function removeItem(itemId: number): ItemRow | null {
 }
 
 /**
+ * Returns the subset of `codes` that already exist as visible items in the list.
+ * Comparison is case-insensitive and trimmed.
+ */
+export function findDuplicateItems(listId: number, codes: string[]): string[] {
+  const visible = stmtGetVisibleItems.all(listId) as ItemRow[];
+  const existingLower = new Set(visible.map((i) => i.code.toLowerCase().trim()));
+  return codes.filter((c) => existingLower.has(c.toLowerCase().trim()));
+}
+
+/**
  * Append new items to an existing list.
  * Returns the newly created ItemRow objects (no message_id yet).
  */
-export function addItemsToList(listId: number, chatId: number, names: string[]): ItemRow[] {
+export function addItemsToList(listId: number, chatId: number, groups: { group: string; items: ExtractedItem[] }[]): ItemRow[] {
   const newItems: ItemRow[] = [];
-  const insertMany = db.transaction((ns: string[]) => {
-    for (const name of ns) {
-      const result = stmtInsertItem.run(listId, chatId, name.trim());
-      const item = db.prepare(`SELECT * FROM items WHERE id = ?`).get(result.lastInsertRowid) as ItemRow;
-      newItems.push(item);
+  const insertMany = db.transaction((gs: { group: string; items: ExtractedItem[] }[]) => {
+    for (const g of gs) {
+      for (const item of g.items) {
+        const result = stmtInsertItem.run(listId, chatId, item.code.trim(), item.details?.trim() ?? null, g.group);
+        const row = db.prepare(`SELECT * FROM items WHERE id = ?`).get(result.lastInsertRowid) as ItemRow;
+        newItems.push(row);
+      }
     }
   });
-  insertMany(names);
+  insertMany(groups);
   return newItems;
 }

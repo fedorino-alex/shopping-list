@@ -119,6 +119,15 @@ dist
 # Firebase cache directory
 .firebase/
 
+# Database
+*.db
+*.db-shm
+*.db-wal
+database/
+
+# Scripts (contains server details)
+*.sh
+
 # TernJS port file
 .tern-port
 

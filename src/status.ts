@@ -1,7 +1,34 @@
 import type { Api } from "grammy";
-import { getChat, updateStatusMsgId } from "./db.js";
+import { getChat, updateStatusMsgId, clearStatusMsgId } from "./db.js";
 import { logger } from "./logger.js";
 import type { InlineKeyboard } from "grammy";
+
+/**
+ * Unpin (in groups) and delete the persistent status message, then clear it from DB.
+ * Used when clearing the list — no new status message is sent.
+ */
+export async function deleteStatusMessage(
+  api: Api,
+  chatId: number,
+  chatType?: string,
+): Promise<void> {
+  const chat = getChat(chatId);
+  if (!chat.status_msg_id) return;
+
+  if (chatType === "group" || chatType === "supergroup") {
+    try {
+      await api.unpinChatMessage(chatId, chat.status_msg_id);
+    } catch {
+      // No permission or already unpinned
+    }
+  }
+  try {
+    await api.deleteMessage(chatId, chat.status_msg_id);
+  } catch {
+    // Already deleted
+  }
+  clearStatusMsgId(chatId);
+}
 
 /**
  * Edit the persistent status message in-place.
@@ -38,18 +65,27 @@ export async function editStatusMessage(
 }
 
 /**
- * Send a fresh status message (e.g. on /start). Deletes the old one if it exists.
+ * Send a fresh status message (e.g. on /start or group join). Deletes the old one if it exists.
+ * Pass `chatType` to auto-pin the message in group chats.
  */
 export async function sendStatusMessage(
   api: Api,
   chatId: number,
   text: string,
   keyboard?: InlineKeyboard,
+  chatType?: string,
 ): Promise<void> {
   const chat = getChat(chatId);
 
-  // Try to delete old status message
+  // Unpin + delete old status message
   if (chat.status_msg_id) {
+    if (chatType === "group" || chatType === "supergroup") {
+      try {
+        await api.unpinChatMessage(chatId, chat.status_msg_id);
+      } catch {
+        // No permission or already unpinned — ignore
+      }
+    }
     try {
       await api.deleteMessage(chatId, chat.status_msg_id);
     } catch {
@@ -62,6 +98,15 @@ export async function sendStatusMessage(
     reply_markup: keyboard,
   });
   updateStatusMsgId(chatId, msg.message_id);
+
+  // Auto-pin in group chats (non-fatal if bot lacks permission)
+  if (chatType === "group" || chatType === "supergroup") {
+    try {
+      await api.pinChatMessage(chatId, msg.message_id, { disable_notification: true });
+    } catch {
+      logger.debug("status", `chat:${chatId} could not pin status message (no permission?)`);
+    }
+  }
 }
 
 /**

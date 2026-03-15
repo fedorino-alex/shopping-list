@@ -15,13 +15,15 @@
 
 ## Project Overview
 
-A Telegram bot for family shopping list management with a **fully button-driven UI**.
+A Telegram bot for family shopping list management with a **fully button-driven UI** augmented by **natural language commands**.
 A single persistent **status message** drives all state transitions via inline keyboard buttons.
-Users send free-form text (items, recipes, any language); all other interactions are button-driven.
-Each shopping list item is a separate Telegram message with its own inline button.
+All text is NL-classified (Groq LLM + heuristic fallback): add items, show list, or start shopping — no explicit AWAITING state.
 
-States: `IDLE → AWAITING_INPUT → NORMAL ⇄ SHOPPING`, plus `EDITING` and `AWAITING_ADD`
-reachable from NORMAL only. See [`.agents/state-machine.md`](.agents/state-machine.md).
+**Private chat:** any text typed is processed as a command. User messages are deleted after `add` and `start_shopping` to keep the chat clean; the status message serves as the only persistent UI element.
+
+**Group chat:** bot joins silently (no message). It only responds when @mentioned or when someone replies to the pinned status message. After any NL command, the old status is unpinned and deleted, and a fresh status is posted at the bottom and repinned — so the pinned message is always current and at the chat bottom. User messages in groups are never deleted. Button presses on the pinned message edit it in place (no re-pin).
+
+States: `IDLE → NORMAL ⇄ SHOPPING`, plus `EDITING` reachable from NORMAL only. See [`.agents/state-machine.md`](.agents/state-machine.md).
 
 ## Tech Stack
 
@@ -48,19 +50,19 @@ shopping-list/
     code-style.md             # Code style guidelines + design decisions
     supermarket-sections.md   # All supermarket departments + products (informs LLM prompt)
   src/
-    index.ts              # Entry point: /start, callback routing, text routing
+    index.ts              # Entry point: /start, my_chat_member, callback routing, NL text routing
     db.ts                 # SQLite: chats/lists/items tables, all CRUD, soft deletes
-    extractor.ts          # Free-form text → item names via Groq llama-3.3-70b (heuristic fallback)
-    render.ts             # Status + item renderers (all states)
-    status.ts             # editStatusMessage, sendStatusMessage, deleteMessages
+    extractor.ts          # classifyAndExtract(text, state) → NLCommand; extractItems for tests
+    render.ts             # Status + item renderers (all states); renderListSummary for NL show reply
+    status.ts             # editStatusMessage, sendStatusMessage (auto-pins in groups), deleteMessages
     logger.ts             # Structured logger: debug/info/error with timestamps
     handlers/
       callback.ts         # Central callback router: action:* / toggle:* / remove:*
-      list.ts             # [New List] + text input → AWAITING_INPUT / NORMAL
-      shop.ts             # [Start Shopping] → sends per-item messages
+      nlcommand.ts        # NL dispatch: getBotState, handleNLCommand → add/remove/show/start_shopping/unknown
+
+      shop.ts             # coreStartShopping; [Start Shopping] / [Finish]; shopping state tracking
       clear.ts            # [Clear List] → soft-delete + cleanup → IDLE
-      compact.ts          # [Compact] + scheduleAutoReset / cancelAutoReset
-      edit.ts             # [Edit List] / [Remove] / [Add Items] / [Done Editing]
+      compact.ts          # [Compact] (delete/re-render group msgs) + scheduleAutoReset / cancelAutoReset
 ```
 
 ## Build & Run Commands

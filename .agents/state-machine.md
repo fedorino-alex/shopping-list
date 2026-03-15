@@ -1,15 +1,39 @@
 # State Machine & UI Reference
 
-## Core Flow
+## Private Chat Flow
 
-1. User sends `/start` — bot creates persistent status message: "No active list" with [New List]
-2. User taps [New List] — status edits to "Send me a comma-separated list..."
-3. User sends `bread, milk, beer, eggs` — bot saves items, status edits to "Shopping List: 4 items" with [Start Shopping] [Clear List] [Edit List]
-4. User taps [Start Shopping] — status becomes header "Shopping List (0/4 done)" with [Compact] [Clear List] [Edit List], bot sends one message per item with [Done] button
-5. User taps [Done] on an item — item text gets strikethrough, button becomes [Undo], header counter updates
-6. [Compact] hides completed items mid-shopping; when all items complete, sends confirmation + schedules 5-min auto-clear
-7. [Clear List] soft-deletes all list data, removes item messages, resets status to IDLE
-8. [Edit List] (from NORMAL or SHOPPING) — switches item keyboards to [Remove], status shows [Add Items] + [Done Editing]
+1. User opens private chat with the bot and sends `/start` — bot sends a persistent status message (IDLE or NORMAL depending on whether a list exists)
+2. **Any text** typed in private is NL-classified automatically — no @mention needed
+3. **Add items** (`добавь молоко`, bare list `молоко хлеб яйца`):
+   - If IDLE: auto-creates a list and transitions to NORMAL
+   - Otherwise: appends to existing list, skipping duplicates
+   - User's message is **deleted** (status message is the only confirmation)
+4. **Remove items** (`убери молоко`): removes matched items via LLM semantic match; status updated; user message deleted
+5. **Show list** (`покажи список`): bot replies with a plain-text summary; status edited in place; user message kept
+6. **Start shopping** (`начни покупки`, `поехали`): transitions to SHOPPING; user message deleted
+7. User taps **[New List]** button — creates empty list immediately, status shows NORMAL
+8. All other button interactions (toggle, compact, finish, clear) work as labeled
+
+## Group Chat Flow
+
+1. Bot is added to group — **completely silent**, no message sent
+2. Bot ignores all messages unless directly addressed
+3. To interact, members either:
+   - Send `@botname <text>` (mention), or
+   - Reply to the pinned status message with text
+4. **First add command** (`@bot добавь молоко`):
+   - Creates list, sends confirmation reply anchored to user's message
+   - Sends a new status message at the **bottom of the chat** and **pins it silently** (no notification)
+5. **Subsequent @mention or reply-to-status commands**:
+   - Bot first **unpins and deletes** the old status message (wherever it is in history)
+   - Sends the updated status message at the **bottom** and **pins it** again
+   - This ensures the pinned message is always current and at the bottom
+6. **Show list** (`@bot покажи список`): unpin+delete old → send new status at bottom → pin
+7. **Start shopping** (`@bot начни покупки`): sends `🛒 Поехали!` reply, then re-sends+re-pins shopping status
+8. **Unknown intent**: bot replies with a context-aware hint; no status change
+9. **Button presses** on the pinned status: edits in place (no re-send/re-pin) — only NL interactions re-pin
+10. User messages in group are **never deleted** by the bot
+11. `/start` in group: explicitly sends and pins a fresh status message (works same as subsequent interactions)
 
 ## State Machine
 
@@ -17,56 +41,65 @@
 stateDiagram-v2
     [*] --> IDLE : /start (no list)
     [*] --> NORMAL : /start (list exists)
+    [*] --> IDLE : bot added to group (silent)
 
-    IDLE --> AWAITING_INPUT : [New List]
-    AWAITING_INPUT --> AWAITING_INPUT : empty input
-    AWAITING_INPUT --> NORMAL : text received
+    IDLE --> NORMAL : NL add (auto-creates list)
 
     NORMAL --> IDLE : [Clear List]
-    NORMAL --> SHOPPING : [Start Shopping]
-    NORMAL --> EDITING : [Edit List]
+    NORMAL --> SHOPPING : [Start Shopping] / NL start_shopping
 
     SHOPPING --> IDLE : [Clear List]
     SHOPPING --> SHOPPING : [Compact] / toggle item
-    SHOPPING --> IDLE : auto-reset (5 min, all done)
-    SHOPPING --> EDITING : [Edit List]
-
-    EDITING --> NORMAL : [Done Editing] (origin=normal)
-    EDITING --> SHOPPING : [Done Editing] (origin=shopping)
-    EDITING --> AWAITING_ADD : [Add Items]
-
-    AWAITING_ADD --> AWAITING_ADD : empty input
-    AWAITING_ADD --> EDITING : items added
+    SHOPPING --> IDLE : auto-reset (30s, all done)
 ```
+
+## Status Message Lifecycle Per Chat Type
+
+| Action | Private chat | Group chat |
+|--------|-------------|------------|
+| `/start` | Send + update DB | Send + pin + update DB |
+| Button press | Edit in place | Edit in place (no re-pin) |
+| NL add (first, IDLE→NORMAL) | Edit in place | Confirmation reply + send new at bottom → pin |
+| NL add (subsequent) | Edit in place | Confirmation reply + edit pinned in place (no re-pin) |
+| NL show | Reply with text + edit in place | Unpin old → delete old → send new at bottom → pin |
+| NL start_shopping | Edit in place | Unpin old → delete old → send new at bottom → pin |
+| NL unknown | Reply only, no status change | Reply only, no status change |
+| [Clear List] | Edit in place to IDLE | Unpin + delete status entirely (no IDLE shown) |
 
 ## Status Message Content Per State
 
-| State          | Text                                   | Buttons                                     |
-|----------------|----------------------------------------|---------------------------------------------|
-| IDLE           | "No active list."                      | [New List]                                  |
-| AWAITING_INPUT | "Send me a comma-separated list..."    | (none)                                      |
-| NORMAL         | "Shopping List: N items"               | [Start Shopping] [Clear List] / [Edit List] |
-| SHOPPING       | "Shopping List (X/Y done)"             | [Compact] [Clear List] / [Edit List]        |
-| EDITING        | "Editing List: N items"                | [Add Items] [Done Editing]                  |
-| AWAITING_ADD   | "Send items to add (comma-separated)." | (none)                                      |
+| State    | Text                          | Buttons                                    |
+|----------|-------------------------------|--------------------------------------------|
+| IDLE     | "Список покупок пуст."        | [New List]                                 |
+| NORMAL   | Items grouped by department   | [Start Shopping] [Clear List]              |
+| SHOPPING | "Покупки (X/Y куплено)"       | [Compact] [Finish]                         |
+
+## Natural Language Commands
+
+Both **@mention** and **reply-to-status-message** in groups, and **any text** in private chat, trigger the same NL pipeline:
+
+| Example phrase (Russian)                | Intent detected   | Action                                      |
+|-----------------------------------------|-------------------|---------------------------------------------|
+| добавь молоко и хлеб                    | `add`             | Adds items; creates list if IDLE            |
+| молоко, хлеб, яйца                      | `add`             | Bare list treated as "add"                  |
+| добавь картошки 1кг                     | `add`             | code="картошка", details="1кг"             |
+| убери молоко                            | `remove`          | Resolves match via LLM, removes item(s)     |
+| вычеркни вино                           | `remove`          | Removes all wine items (белое + красное)    |
+| покажи список                           | `show`            | Replies with plain-text summary             |
+| что в списке?                           | `show`            | Same as above                               |
+| начни покупки                           | `start_shopping`  | Switches to SHOPPING mode                   |
+| поехали                                 | `start_shopping`  | Same                                        |
+| anything else                           | `unknown`         | Context-aware hint reply                    |
+
+**Private chat:** user message deleted after `add`, `remove`, and `start_shopping`; kept for `show` and `unknown`.
+**Group chat:** user messages never deleted; confirmation reply anchored to user's message.
 
 ## Callback Data Format
 
-| Pattern                 | Handler                    | Description                           |
-|-------------------------|----------------------------|---------------------------------------|
-| `action:new_list`       | `list.handleNewList`       | Transition IDLE -> AWAITING           |
-| `action:start_shopping` | `shop.handleStartShopping` | Transition NORMAL -> SHOPPING         |
-| `action:clear_list`     | `clear.handleClearList`    | Transition any -> IDLE                |
-| `action:compact`        | `compact.handleCompact`    | Hide completed items in SHOPPING      |
-| `action:edit_list`      | `edit.handleEditList`      | Transition NORMAL/SHOPPING -> EDITING |
-| `action:done_editing`   | `edit.handleDoneEditing`   | Return to NORMAL or SHOPPING          |
-| `action:add_items`      | `edit.handleAddItems`      | Transition EDITING -> AWAITING_ADD    |
-| `toggle:<item_id>`      | `callback.handleToggle`    | Flip item complete/active             |
-| `remove:<item_id>`      | `edit.handleRemoveItem`    | Soft-delete item, delete its message  |
-
-## Future Iterations
-
-- Natural language parsing (LLM-based) instead of comma-separated input
-- Grouped items by shop area (single message with multiple buttons per group)
-- Multiple concurrent lists
-- Shared family group chat support
+| Pattern                 | Handler                       | Description                           |
+|-------------------------|-------------------------------|---------------------------------------|
+| `action:start_shopping` | `shop.handleStartShopping`    | Transition NORMAL → SHOPPING          |
+| `action:clear_list`     | `clear.handleClearList`       | Transition any → IDLE                 |
+| `action:compact`        | `compact.handleCompact`       | Hide completed items in SHOPPING      |
+| `action:finish_shopping`| `shop.handleFinishShopping`   | Finish shopping → NORMAL              |
+| `toggle:<item_id>`      | `callback.handleToggle`       | Flip item complete/active             |

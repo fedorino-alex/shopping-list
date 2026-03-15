@@ -19,35 +19,105 @@ function pluralItems(count: number): string {
   return `${count} товаров`;
 }
 
+function pluralGroups(count: number): string {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod100 >= 11 && mod100 <= 14) return `${count} отделах`;
+  if (mod10 === 1) return `${count} отделе`;
+  if (mod10 >= 2 && mod10 <= 4) return `${count} отделах`;
+  return `${count} отделах`;
+}
+
+const GROUP_EMOJI: Record<string, string> = {
+  "Хлеб и хлебобулочные изделия": "🍞",
+  "Фрукты, овощи и зелень": "🥦",
+  "Сухофрукты и орехи": "🥜",
+  "Замороженные продукты": "🧊",
+  "Мясо и птица": "🥩",
+  "Рыба и морепродукты": "🐟",
+  "Сыры": "🧀",
+  "Колбасные изделия": "🌭",
+  "Готовые блюда и кулинария": "🍱",
+  "Молоко, молочные продукты и яйца": "🥛",
+  "Растительные продукты": "🌱",
+  "Кухни мира": "🌍",
+  "Напитки и соки": "🧃",
+  "Сладости": "🍫",
+  "Солёные закуски": "🍿",
+  "Консервы и заготовки": "🥫",
+  "Соусы, приправы и масла": "🫙",
+  "Крупы и сыпучие продукты": "🌾",
+  "Товары для выпечки": "🧁",
+  "Кофе, чай и какао": "☕",
+  "Алкоголь": "🍷",
+  "Бытовая химия и чистящие средства": "🧹",
+  "Гигиена и косметика": "🧴",
+  "Товары для детей и мам": "👶",
+  "Игрушки": "🧸",
+  "Товары для животных": "🐾",
+  "Канцелярские и школьные товары": "✏️",
+  "Товары для дома": "🏠",
+  "Инструменты и ремонт": "🔧",
+  "Сад и огород": "🌿",
+  "Электроника и мультимедиа": "🔌",
+  "Спорт и отдых": "⚽",
+  "Автотовары": "🚗",
+  "Разное": "📦",
+};
+
+// --- Item name helper ---
+
+/** Canonical display name: code plus optional details. */
+export function renderItemName(item: { code: string; details: string | null | undefined }): string {
+  return item.details ? `${item.code}, ${item.details}` : item.code;
+}
+
 // --- Status message renderers (one persistent message, edited per state) ---
 
 /** IDLE state: no active list */
-export function renderIdleStatus(): { text: string; keyboard: InlineKeyboard } {
+export function renderIdleStatus(): { text: string; keyboard?: InlineKeyboard } {
   return {
-    text: escapeMarkdown("Список покупок пуст."),
-    keyboard: new InlineKeyboard().text("📝 Новый список", "action:new_list"),
+    text: escapeMarkdown("Список покупок пуст. Напишите что купить, чтобы начать новый список."),
   };
 }
 
-/** AWAITING_INPUT state: waiting for free-form input */
-export function renderAwaitingStatus(): { text: string; keyboard?: undefined } {
-  return {
-    text: escapeMarkdown("Отправьте список покупок — можно в любой форме: перечислением, рецептом, текстом."),
-  };
-}
-
-/** NORMAL state: list exists, not shopping — shows all items then a summary line */
+/** NORMAL state: list exists, not shopping — shows items grouped by department */
 export function renderNormalStatus(items: ItemRow[]): { text: string; keyboard: InlineKeyboard } {
-  const lines = items.map((i) => escapeMarkdown(`• ${i.name}`));
-  if (lines.length > 0) lines.push(""); // blank line before summary
-  lines.push(escapeMarkdown(`🛒 ${pluralItems(items.length)}`));
+  const lines: string[] = [];
+
+  if (items.length === 0) {
+    lines.push(escapeMarkdown("🛒 Список покупок пуст."));
+  } else {
+    // Group items by their department, preserving insertion order of first appearance
+    const groupMap = new Map<string, ItemRow[]>();
+    for (const item of items) {
+      const key = item.group || "Разное";
+      if (!groupMap.has(key)) groupMap.set(key, []);
+      groupMap.get(key)!.push(item);
+    }
+
+    for (const [groupName, groupItems] of groupMap) {
+      const emoji = GROUP_EMOJI[groupName] ?? "📦";
+      lines.push(escapeMarkdown(`${emoji} ${groupName} — ${pluralItems(groupItems.length)}`));
+      for (const item of groupItems) {
+        lines.push(escapeMarkdown(`  • ${renderItemName(item)}`));
+      }
+      lines.push(""); // blank line between groups
+    }
+
+    // Remove trailing blank line
+    if (lines[lines.length - 1] === "") lines.pop();
+
+    lines.push("");
+    lines.push(escapeMarkdown(`━━━━━━━━━━━━━━`));
+    lines.push(escapeMarkdown(`Итого: ${pluralItems(items.length)} в ${pluralGroups(groupMap.size)}`));
+  }
+
   return {
     text: lines.join("\n"),
     keyboard: new InlineKeyboard()
       .text("🛍 Начать покупки", "action:start_shopping")
-      .text("🗑 Очистить", "action:clear_list")
-      .row()
-      .text("✏️ Изменить список", "action:edit_list"),
+      .text("🗑 Очистить", "action:clear_list"),
   };
 }
 
@@ -63,43 +133,71 @@ export function renderShoppingStatus(items: ItemRow[]): { text: string; keyboard
   };
 }
 
-/** EDITING state: status header while editing the list */
-export function renderEditingStatus(itemCount: number): { text: string; keyboard: InlineKeyboard } {
-  return {
-    text: escapeMarkdown(`✏️ Редактирование: ${pluralItems(itemCount)}`),
-    keyboard: new InlineKeyboard()
-      .text("➕ Добавить", "action:add_items")
-      .text("💾 Готово", "action:done_editing"),
-  };
-}
-
-/** AWAITING_ADD sub-state: waiting for user to send items to add */
-export function renderAwaitingAddStatus(): { text: string } {
-  return {
-    text: escapeMarkdown("➕ Отправьте товары для добавления."),
-  };
-}
-
 // --- Item renderers ---
-
-const ITEM_PAD_WIDTH = 25;
-
-export function renderItemText(item: ItemRow): string {
-  const padded = item.name.padEnd(ITEM_PAD_WIDTH);
-  // Backtick content in MarkdownV2 needs only backtick and backslash escaped
-  const codeText = padded.replace(/[`\\]/g, "\\$&");
-  if (item.complete) {
-    return `\u2705 \`${codeText}\``;
-  }
-  return `\`${codeText}\``;
-}
 
 export function renderItemKeyboard(item: ItemRow): InlineKeyboard {
   const label = item.complete ? "↩️ Вернуть" : "🪙 Куплено";
   return new InlineKeyboard().text(label, `toggle:${item.id}`);
 }
 
-/** Keyboard shown on each item message while in EDITING state */
-export function renderItemRemoveKeyboard(item: ItemRow): InlineKeyboard {
-  return new InlineKeyboard().text("🗑 Удалить", `remove:${item.id}`);
+/**
+ * Plain-text summary of the shopping list, grouped by department with emoji headers.
+ * No MarkdownV2 — safe to send as a regular chat reply.
+ */
+export function renderListSummary(items: ItemRow[]): string {
+  if (items.length === 0) return "Список пуст 📝";
+
+  const groupMap = new Map<string, ItemRow[]>();
+  for (const item of items) {
+    const key = item.group || "Разное";
+    if (!groupMap.has(key)) groupMap.set(key, []);
+    groupMap.get(key)!.push(item);
+  }
+
+  const lines: string[] = [];
+  for (const [groupName, groupItems] of groupMap) {
+    const emoji = GROUP_EMOJI[groupName] ?? "📦";
+    lines.push(`${emoji} ${groupName}`);
+    for (const item of groupItems) {
+      const prefix = item.complete ? "✅" : "•";
+      lines.push(`  ${prefix} ${renderItemName(item)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+// --- Group message renderer (SHOPPING mode) ---
+
+const MAX_BUTTON_LABEL = 32;
+
+/**
+ * One Telegram message per department group in SHOPPING mode.
+ * Shows active items as a bulleted list, completed items with strikethrough.
+ * Each item has its own toggle button on a separate row.
+ */
+export function renderGroupMessage(
+  groupName: string,
+  items: ItemRow[]
+): { text: string; keyboard: InlineKeyboard } {
+  const emoji = GROUP_EMOJI[groupName] ?? "📦";
+  const lines: string[] = [];
+
+  lines.push(`${emoji} *${escapeMarkdown(groupName)}*`);
+  for (const item of items) {
+    if (item.complete) {
+      lines.push(`✅ ~${escapeMarkdown(renderItemName(item))}~`);
+    } else {
+      lines.push(escapeMarkdown(`• ${renderItemName(item)}`));
+    }
+  }
+
+  const keyboard = new InlineKeyboard();
+  for (const item of items) {
+    const label = item.complete
+      ? `↩️ ${item.code}`.slice(0, MAX_BUTTON_LABEL)
+      : `🪙 ${item.code}`.slice(0, MAX_BUTTON_LABEL);
+    keyboard.text(label, `toggle:${item.id}`).row();
+  }
+
+  return { text: lines.join("\n"), keyboard };
 }
