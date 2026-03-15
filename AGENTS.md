@@ -82,7 +82,9 @@ npx vitest run                     # Run tests (when added)
 | Variable         | Required | Default | Description                                                              |
 |------------------|----------|---------|--------------------------------------------------------------------------|
 | `BOT_TOKEN`      | Yes      | —       | Telegram bot token from @BotFather                                       |
-| `GROQ_API_KEY`   | No*      | —       | Groq API key for NL classification + extraction (llama-3.3-70b). Without it all text → "unknown" (no add/remove via NL). |
+| `GROQ_API_KEY`   | No*      | —       | LLM API key. Required for Groq. Not needed for local Ollama — set `LLM_BASE_URL` instead. Without both → all text → "unknown". |
+| `LLM_BASE_URL`   | No       | Groq URL | Override LLM endpoint. Set to `http://localhost:11434/v1/chat/completions` for Ollama. |
+| `LLM_MODEL`      | No       | `llama-3.3-70b-versatile` | Model name. For Ollama use e.g. `qwen2.5:14b`. |
 | `LOG_LEVEL`      | No       | `debug` | `debug`, `info`, or `error`                                              |
 
 ## Bot Commands

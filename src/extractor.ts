@@ -1,8 +1,9 @@
 import { logger } from "./logger.js";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_MODEL = "llama-3.3-70b-versatile";
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = process.env.LLM_MODEL ?? "llama-3.3-70b-versatile";
+const GROQ_URL = process.env.LLM_BASE_URL ?? "https://api.groq.com/openai/v1/chat/completions";
+const LLM_ENABLED = !!(GROQ_API_KEY || process.env.LLM_BASE_URL);
 
 export interface ExtractedItem {
   code: string;
@@ -97,8 +98,8 @@ function parseGroups(raw: unknown): ExtractedGroup[] {
  * Returns [{intent:'unknown'}] if Groq key is absent or on any error.
  */
 export async function classifyAndExtract(text: string, state: BotState): Promise<NLCommandStep[]> {
-  if (!GROQ_API_KEY) {
-    logger.debug("extractor", "no GROQ_API_KEY — returning unknown");
+  if (!LLM_ENABLED) {
+    logger.debug("extractor", "no LLM configured — returning unknown");
     return [{ intent: "unknown" }];
   }
 
@@ -107,7 +108,7 @@ export async function classifyAndExtract(text: string, state: BotState): Promise
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${GROQ_API_KEY}`,
+        ...(GROQ_API_KEY ? { Authorization: `Bearer ${GROQ_API_KEY}` } : {}),
       },
       body: JSON.stringify({
         model: GROQ_MODEL,
@@ -218,7 +219,7 @@ export async function resolveRemoveTargets(
 ): Promise<{ id: number; code: string; details: string | null }[]> {
   if (items.length === 0) return [];
 
-  if (GROQ_API_KEY) {
+  if (LLM_ENABLED) {
     try {
       const itemList = items
         .map((item) => `- ${item.code}`)
@@ -230,7 +231,7 @@ export async function resolveRemoveTargets(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${GROQ_API_KEY}`,
+          ...(GROQ_API_KEY ? { Authorization: `Bearer ${GROQ_API_KEY}` } : {}),
         },
         body: JSON.stringify({
           model: GROQ_MODEL,
