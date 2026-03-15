@@ -82,7 +82,7 @@ npx vitest run                     # Run tests (when added)
 | Variable         | Required | Default | Description                                                              |
 |------------------|----------|---------|--------------------------------------------------------------------------|
 | `BOT_TOKEN`      | Yes      | —       | Telegram bot token from @BotFather                                       |
-| `GROQ_API_KEY`   | No       | —       | Groq API key for free-form item extraction (llama-3.3-70b); heuristic fallback used if absent |
+| `GROQ_API_KEY`   | No*      | —       | Groq API key for NL classification + extraction (llama-3.3-70b). Without it all text → "unknown" (no add/remove via NL). |
 | `LOG_LEVEL`      | No       | `debug` | `debug`, `info`, or `error`                                              |
 
 ## Bot Commands

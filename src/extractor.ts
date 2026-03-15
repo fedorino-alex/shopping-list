@@ -16,12 +16,15 @@ export interface ExtractedGroup {
 
 export type BotState = 'IDLE' | 'NORMAL' | 'SHOPPING';
 
-export type NLCommand =
+export type NLCommandStep =
   | { intent: 'add'; groups: ExtractedGroup[] }
   | { intent: 'remove'; query: string }
   | { intent: 'show' }
   | { intent: 'start_shopping' }
   | { intent: 'unknown' };
+
+/** @deprecated Use NLCommandStep */
+export type NLCommand = NLCommandStep;
 
 const DEPT_MAPPING = `- Хлеб и хлебобулочные изделия: хлеб, булочки, багеты, выпечка, вафли, тортилья, безглютеновый хлеб
 - Фрукты, овощи и зелень: фрукты, овощи, зелень, салаты, грибы, квашеные овощи
@@ -57,191 +60,110 @@ const DEPT_MAPPING = `- Хлеб и хлебобулочные изделия: �
 - Спорт и отдых: спортинвентарь, спортивная одежда
 - Автотовары: моторное масло, автохимия, размораживатель`;
 
-const SYSTEM_PROMPT = `You are a shopping list extractor for a large supermarket. Extract items from the user's message and assign each item to the correct department.
 
-Department mapping (use these exact Russian department names):
-${DEPT_MAPPING}
 
-Return ONLY a JSON object in this format:
-{"groups": [{"group": "<exact department name>", "items": [{"code": "canonical item name", "details": "quantity or null"}]}]}
-
-Rules:
-- Only include groups that have at least one item from the user's message
-- code: canonical base/nominative form of the product (1-4 words). E.g. "картошка", "белое вино", "молоко"
-- details: quantity, weight, or other specifics if mentioned (e.g. "1кг", "2л", "500г"). Use null if not mentioned
-- Keep the original language (Russian stays Russian, English stays English)
-- Strip numbering and bullet points
-- Do not add items not mentioned; do not split or combine items
-- If an item does not fit any department, assign it to "Разное"`;
-
-/**
- * Extract items from free-form text using Groq (llama-3.3-70b), grouped by supermarket department.
- * Falls back to heuristic splitting if GROQ_API_KEY is not set or on any error.
- */
-export async function extractItems(text: string): Promise<ExtractedGroup[]> {
-  if (GROQ_API_KEY) {
-    try {
-      const res = await fetch(GROQ_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: text },
-          ],
-          response_format: { type: "json_object" },
-          temperature: 0,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Groq API error: ${res.status} ${res.statusText}`);
-      }
-
-      const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-      const raw = json.choices?.[0]?.message?.content?.trim() ?? "";
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-
-      const rawGroups = Array.isArray(parsed.groups) ? parsed.groups : null;
-
-      if (rawGroups) {
-        const groups: ExtractedGroup[] = (rawGroups as unknown[])
-          .filter(
-            (g): g is { group: string; items: unknown[] } =>
-              typeof (g as Record<string, unknown>).group === "string" &&
-              Array.isArray((g as Record<string, unknown>).items)
-          )
-          .map((g) => ({
-            group: g.group.trim(),
-            items: (g.items as unknown[])
-              .filter(
-                (it): it is { code: string; details?: string | null } =>
-                  typeof (it as Record<string, unknown>).code === "string"
-              )
-              .map((it) => ({
-                code: it.code.trim(),
-                ...(it.details && typeof it.details === "string" && it.details.trim()
-                  ? { details: it.details.trim() }
-                  : {}),
-              }))
-              .filter((it) => it.code.length > 0),
-          }))
-          .filter((g) => g.items.length > 0);
-
-        if (groups.length > 0) {
-          const total = groups.reduce((n, g) => n + g.items.length, 0);
-          logger.debug(
-            "extractor",
-            `groq extracted ${total} items in ${groups.length} groups: ${groups.map((g) => `${g.group}:[${g.items.map((i) => i.code).join(", ")}]`).join(" | ")}`
-          );
-          return groups;
-        }
-      }
-      logger.debug("extractor", "groq returned empty result, falling back to heuristic");
-    } catch (err) {
-      logger.error("extractor", "groq API error, falling back to heuristic", err);
-    }
-  }
-
-  return heuristicExtract(text);
+/** Parse and validate a groups array from LLM output. */
+function parseGroups(raw: unknown): ExtractedGroup[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[])
+    .filter(
+      (g): g is { group: string; items: unknown[] } =>
+        typeof (g as Record<string, unknown>).group === "string" &&
+        Array.isArray((g as Record<string, unknown>).items)
+    )
+    .map((g) => ({
+      group: g.group.trim(),
+      items: (g.items as unknown[])
+        .filter(
+          (it): it is { code: string; details?: string | null } =>
+            typeof (it as Record<string, unknown>).code === "string"
+        )
+        .map((it) => ({
+          code: it.code.trim(),
+          ...(it.details && typeof it.details === "string" && it.details.trim()
+            ? { details: it.details.trim() }
+            : {}),
+        }))
+        .filter((it) => it.code.length > 0),
+    }))
+    .filter((g) => g.items.length > 0);
 }
 
 /**
- * Classify the user's natural-language intent and, when intent is "add",
- * simultaneously extract grocery items. Passes current bot state to the LLM
- * for smarter disambiguation. Falls back to keyword heuristics if Groq is unavailable.
+ * Classify the user's intent and extract commands. Returns an ordered array of
+ * NLCommandStep — usually one element, but two for compound messages like
+ * "убери X и добавь Y" or "замени X на Y" (remove + add in order).
+ * Returns [{intent:'unknown'}] if Groq key is absent or on any error.
  */
-export async function classifyAndExtract(text: string, state: BotState): Promise<NLCommand> {
-  if (GROQ_API_KEY) {
-    try {
-      const res = await fetch(GROQ_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          messages: [
-            { role: "system", content: buildClassifyPrompt(state) },
-            { role: "user", content: text },
-          ],
-          response_format: { type: "json_object" },
-          temperature: 0,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`Groq API error: ${res.status} ${res.statusText}`);
-      }
-
-      const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-      const raw = json.choices?.[0]?.message?.content?.trim() ?? "";
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      const intent = parsed.intent as string;
-
-      if (intent === "show") {
-        logger.debug("extractor", "classify: show");
-        return { intent: "show" };
-      }
-      if (intent === "start_shopping") {
-        logger.debug("extractor", "classify: start_shopping");
-        return { intent: "start_shopping" };
-      }
-      if (intent === "remove") {
-        const query = typeof parsed.query === "string" ? parsed.query.trim() : "";
-        if (query) {
-          logger.debug("extractor", `classify: remove, query="${query}"`);
-          return { intent: "remove", query };
-        }
-        return { intent: "unknown" };
-      }
-      if (intent === "add") {
-        const rawGroups = Array.isArray(parsed.groups) ? parsed.groups : [];
-        const groups: ExtractedGroup[] = (rawGroups as unknown[])
-          .filter(
-            (g): g is { group: string; items: unknown[] } =>
-              typeof (g as Record<string, unknown>).group === "string" &&
-              Array.isArray((g as Record<string, unknown>).items)
-          )
-          .map((g) => ({
-            group: g.group.trim(),
-            items: (g.items as unknown[])
-              .filter(
-                (it): it is { code: string; details?: string | null } =>
-                  typeof (it as Record<string, unknown>).code === "string"
-              )
-              .map((it) => ({
-                code: it.code.trim(),
-                ...(it.details && typeof it.details === "string" && it.details.trim()
-                  ? { details: it.details.trim() }
-                  : {}),
-              }))
-              .filter((it) => it.code.length > 0),
-          }))
-          .filter((g) => g.items.length > 0);
-
-        if (groups.length > 0) {
-          const total = groups.reduce((n, g) => n + g.items.length, 0);
-          logger.debug("extractor", `classify: add, ${total} items in ${groups.length} groups`);
-          return { intent: "add", groups };
-        }
-        // Groq said "add" but extracted nothing
-        return { intent: "unknown" };
-      }
-
-      logger.debug("extractor", `classify: unknown (intent="${intent}")`);
-      return { intent: "unknown" };
-    } catch (err) {
-      logger.error("extractor", "classify groq error, falling back to heuristic", err);
-    }
+export async function classifyAndExtract(text: string, state: BotState): Promise<NLCommandStep[]> {
+  if (!GROQ_API_KEY) {
+    logger.debug("extractor", "no GROQ_API_KEY — returning unknown");
+    return [{ intent: "unknown" }];
   }
 
-  return heuristicClassify(text, state);
+  try {
+    const res = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: [
+          { role: "system", content: buildClassifyPrompt(state) },
+          { role: "user", content: text },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0,
+      }),
+    });
+
+    if (!res.ok) throw new Error(`Groq API error: ${res.status} ${res.statusText}`);
+
+    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const raw = json.choices?.[0]?.message?.content?.trim() ?? "";
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+    const rawCommands = Array.isArray(parsed.commands) ? parsed.commands : null;
+    if (!rawCommands || rawCommands.length === 0) {
+      logger.debug("extractor", "classify: no commands array in response");
+      return [{ intent: "unknown" }];
+    }
+
+    const steps: NLCommandStep[] = [];
+    for (const cmd of rawCommands as unknown[]) {
+      const c = cmd as Record<string, unknown>;
+      const intent = c.intent as string;
+
+      if (intent === "show") {
+        steps.push({ intent: "show" });
+      } else if (intent === "start_shopping") {
+        steps.push({ intent: "start_shopping" });
+      } else if (intent === "remove") {
+        const query = typeof c.query === "string" ? c.query.trim() : "";
+        steps.push(query ? { intent: "remove", query } : { intent: "unknown" });
+      } else if (intent === "add") {
+        const groups = parseGroups(c.groups);
+        steps.push(groups.length > 0 ? { intent: "add", groups } : { intent: "unknown" });
+      } else {
+        steps.push({ intent: "unknown" });
+      }
+    }
+
+    const itemCount = steps.reduce(
+      (n, s) => n + (s.intent === "add" ? s.groups.flatMap((g) => g.items).length : 0),
+      0,
+    );
+    logger.debug(
+      "extractor",
+      `classify: [${steps.map((s) => s.intent).join(", ")}]${itemCount > 0 ? `, ${itemCount} item(s)` : ""}`,
+    );
+    return steps.length > 0 ? steps : [{ intent: "unknown" }];
+  } catch (err) {
+    logger.error("extractor", "classify groq error", err);
+    return [{ intent: "unknown" }];
+  }
 }
 
 function buildClassifyPrompt(state: BotState): string {
@@ -250,90 +172,34 @@ function buildClassifyPrompt(state: BotState): string {
     NORMAL: "a shopping list exists",
     SHOPPING: "shopping is in progress",
   };
-  return `You are a shopping list bot assistant. Classify the user's message intent.
+  return `You are a shopping list bot assistant. Classify the user's message and extract commands.
 Bot state: ${state} — ${stateDesc[state]}.
 
-Intents:
+Commands:
 - "add": user wants to add grocery items (e.g. "добавь молоко", "купи хлеб и масло", bare product list like "молоко хлеб яйца")
-- "remove": user wants to remove or delete items from the list (e.g. "убери молоко", "удали хлеб", "вычеркни вино")
-- "show": user wants to see the current shopping list (e.g. "покажи список", "что в списке", "what's on the list")
-- "start_shopping": user wants to begin shopping (e.g. "начни покупки", "поехали", "идём", "старт", "go shopping")
-- "unknown": unrelated to the shopping list or intent is unclear
+- "remove": user wants to remove or delete items (e.g. "убери молоко", "удали хлеб", "вычеркни вино")
+- "show": user wants to see the current list (e.g. "покажи список", "что в списке")
+- "start_shopping": user wants to begin shopping (e.g. "начни покупки", "поехали", "старт")
+- "unknown": unclear or unrelated
 
-If intent is "add", also extract grocery items and assign each to the correct supermarket department.
-If intent is "remove", normalize what the user wants to remove to a clean base form (query).
+Messages can contain multiple commands in sequence:
+- "убери молоко и добавь кефир" → [{"intent":"remove","query":"молоко"}, {"intent":"add",...кефир...}]
+- "замени молоко на кефир" → [{"intent":"remove","query":"молоко"}, {"intent":"add",...кефир...}]
+Single-intent messages produce a one-element array. Commands must be in execution order (removes before adds).
+
+Return ONLY valid JSON: {"commands": [...]}
+Each element:
+- add: {"intent":"add","groups":[{"group":"<exact dept name>","items":[{"code":"canonical item name","details":"quantity or null"}]}]}
+- remove: {"intent":"remove","query":"<canonical base form, e.g. вино, молоко>"}
+- others: {"intent":"show"} / {"intent":"start_shopping"} / {"intent":"unknown"}
 
 Department mapping (use these exact Russian department names):
 ${DEPT_MAPPING}
 
-Return ONLY valid JSON:
-- For "add": {"intent":"add","groups":[{"group":"<exact dept name>","items":[{"code":"canonical item name","details":"quantity or null"}]}]}
-- For "remove": {"intent":"remove","query":"<canonical base form of what to remove, e.g. вино, молоко>"}
-- For others: {"intent":"show"} or {"intent":"start_shopping"} or {"intent":"unknown"}
-
-Rules for item extraction (only when intent = "add"):
-- code: canonical base/nominative form of the product (1-4 words). E.g. "картошка", "белое вино"
-- details: quantity, weight, or other specifics if mentioned (e.g. "1кг", "2л"). Use null if not mentioned
-- Strip numbering and command words ("добавь", "купи", "нужно" etc.)
-- Keep original language of item names; unrecognized items → "Разное"`;
-}
-
-/** Heuristic fallback for when Groq is unavailable. */
-function heuristicClassify(text: string, state: BotState): NLCommand {
-  const lower = text.toLowerCase();
-
-  if (/покажи|что (в|нужно купить)|состав/.test(lower) || /\bсписок\b/.test(lower) && /\bпокажи|\bвидеть|\bхочу\b/.test(lower)) {
-    return { intent: "show" };
-  }
-  if (/начни|начать|стартуй|поехали|\bстарт\b|идём|в магазин|go shopping/.test(lower)) {
-    return { intent: "start_shopping" };
-  }
-  if (/\b(убери|удали|вычеркни|сними|исключи)\b/.test(lower)) {
-    const query = text.replace(/^\s*(убери|удали|вычеркни|сними|исключи)\s*/i, "").trim();
-    return { intent: "remove", query: query || text };
-  }
-
-  const hasAddKeyword = /\b(добавь|добавить|купи|купить|нужно|возьми|взять|положи)\b/.test(lower);
-  if (hasAddKeyword || state !== "SHOPPING") {
-    const stripped = text
-      .replace(/^\s*(добавь|добавить|купи|купить|нужно|возьми|взять|положи)\s*/i, "")
-      .trim();
-    const groups = heuristicExtract(stripped || text);
-    if (groups.flatMap((g) => g.items).length > 0) {
-      return { intent: "add", groups };
-    }
-  }
-
-  return { intent: "unknown" };
-}
-
-/**
- * Simple heuristic fallback: splits on common delimiters, strips leading
- * quantities/numbering, deduplicates, and normalizes whitespace.
- * Returns a single group "Разное" containing all extracted items.
- */
-function heuristicExtract(text: string): ExtractedGroup[] {
-  const seen = new Set<string>();
-  const items = text
-    .split(/[,\n;]|\s*[•\-\*]\s+/)
-    .map((s) =>
-      s
-        .trim()
-        // strip leading numbered list markers: "1.", "2)", "3 -"
-        .replace(/^\d+[\.\)\-]\s*/, "")
-        // strip leading quantity+unit: "500g ", "2 cups of ", "3 шт "
-        .replace(/^\d+[\d.,]*\s*(?:g|kg|ml|l|oz|lb|шт|г|кг|мл|л|cups?|tbsp|tsp|pcs?)\.?\s+(?:of\s+)?/i, "")
-        .trim()
-    )
-    .filter((s) => {
-      if (s.length === 0) return false;
-      const key = s.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .map((s): ExtractedItem => ({ code: s }));
-  return items.length > 0 ? [{ group: "Разное", items }] : [];
+Rules for extraction (intent="add"):
+- code: canonical base/nominative form (1–4 words), e.g. "картошка", "белое вино"
+- details: quantity/weight if mentioned ("1кг", "2л"), else null
+- Strip command words ("добавь", "купи", "замени" etc.); keep original language; unknown items → "Разное"`;
 }
 
 /**

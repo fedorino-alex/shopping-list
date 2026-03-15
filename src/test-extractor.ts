@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { extractItems, resolveRemoveTargets } from "./extractor.js";
+import { classifyAndExtract, resolveRemoveTargets } from "./extractor.js";
 
 interface TestCase {
   label: string;
@@ -38,6 +38,10 @@ const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
 const YELLOW = "\x1b[33m";
 const RESET = "\x1b[0m";
+const DIM = "\x1b[2m";
+
+const DELAY_MS = 2000;
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function check(label: string, items: string[], tc: TestCase): boolean {
   const lower = items.map((s) => s.toLowerCase());
@@ -63,18 +67,26 @@ function check(label: string, items: string[], tc: TestCase): boolean {
 
 async function main() {
   const usingGroq = !!process.env.GROQ_API_KEY;
-  console.log(`\nExtractor mode: ${usingGroq ? `${GREEN}Groq LLM (llama-3.3-70b-versatile)${RESET}` : `${YELLOW}heuristic fallback (no GROQ_API_KEY)${RESET}`}`);
+  console.log(`\nExtractor mode: ${usingGroq ? `${GREEN}Groq LLM (llama-3.3-70b-versatile)${RESET}` : `${YELLOW}no GROQ_API_KEY — add tests will return unknown${RESET}`}`);
   console.log(`Running tests...\n`);
 
   let passed = 0;
   let failed = 0;
 
-  // --- extractItems tests ---
-  for (const tc of TESTS) {
+  // --- classifyAndExtract "add" tests ---
+  for (let i = 0; i < TESTS.length; i++) {
+    if (i > 0 && usingGroq) {
+      process.stdout.write(`${DIM}  (waiting ${DELAY_MS}ms)${RESET}\r`);
+      await delay(DELAY_MS);
+    }
+    const tc = TESTS[i];
     let items: string[] = [];
     try {
-      const groups = await extractItems(tc.input);
-      items = groups.flatMap((g) => g.items.map((i) => i.code));
+      const steps = await classifyAndExtract(tc.input, "NORMAL");
+      const step = steps[0];
+      if (step.intent === "add") {
+        items = step.groups.flatMap((g) => g.items.map((i) => i.code));
+      }
     } catch (err) {
       console.log(`${RED}✗ ERROR${RESET} ${tc.label}: ${err}`);
       failed++;
@@ -134,7 +146,12 @@ async function main() {
     },
   ];
 
-  for (const rt of removeTests) {
+  for (let i = 0; i < removeTests.length; i++) {
+    if (usingGroq) {
+      process.stdout.write(`${DIM}  (waiting ${DELAY_MS}ms)${RESET}\r`);
+      await delay(DELAY_MS);
+    }
+    const rt = removeTests[i];
     try {
       const matched = await resolveRemoveTargets(rt.query, rt.items);
       const matchedIds = matched.map((i) => i.id);

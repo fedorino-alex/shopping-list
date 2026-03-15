@@ -17,19 +17,21 @@ export interface ExtractedGroup {
 
 export type BotState = 'IDLE' | 'NORMAL' | 'SHOPPING';
 
-export type NLCommand =
+export type NLCommandStep =
   | { intent: 'add'; groups: ExtractedGroup[] }
   | { intent: 'remove'; query: string }  // query = normalized removal phrase, e.g. "вино"
   | { intent: 'show' }
   | { intent: 'start_shopping' }
   | { intent: 'unknown' };
+
+/** @deprecated alias for NLCommandStep */
+export type NLCommand = NLCommandStep;
 ```
 
-| Function                                   | Returns                   | Description |
-|--------------------------------------------|---------------------------|-------------|
-| `extractItems(text)`                       | `Promise<ExtractedGroup[]>` | Pure item extraction (kept for test-extractor.ts). Groq llama-3.3-70b if key set; heuristic fallback. |
-| `classifyAndExtract(text, state)`          | `Promise<NLCommand>`      | Single Groq call: classifies intent AND extracts items (if 'add') or query (if 'remove'). Passes `BotState` as context. Heuristic keyword fallback if Groq unavailable. |
-| `resolveRemoveTargets(query, items)`       | `Promise<ItemRow[]>`      | Given a removal query and visible items list, uses Groq semantically to find which items match (e.g. "вино" → ["белое вино", "красное вино"]). Substring fallback. |
+| Function                              | Returns                    | Description |
+|---------------------------------------|----------------------------|-------------|
+| `classifyAndExtract(text, state)`     | `Promise<NLCommandStep[]>` | Single Groq call: classifies intent AND extracts items/query. Returns an **ordered array** — usually one element, but two for compound messages like "убери X и добавь Y" or "замени X на Y". Returns `[{intent:'unknown'}]` if Groq key absent or on error. |
+| `resolveRemoveTargets(query, items)`  | `Promise<ItemRow[]>`       | Given a removal query and visible items list, uses Groq semantically to find which items match (e.g. "вино" → ["белое вино", "красное вино"]). Substring fallback if Groq unavailable. |
 
 ## src/handlers/workflow.ts
 
@@ -62,16 +64,19 @@ export interface ChatWorkflow {
 | Function                     | Returns         | Description |
 |------------------------------|-----------------|-------------|
 | `getBotState(chatId)`        | `BotState`      | Derives current state from DB + in-memory sets (no active list → IDLE; shopping → SHOPPING; else NORMAL) |
-| `handleNLCommand(ctx, text)` | `Promise<void>` | Central NL dispatch: classify intent → route to add/remove/show/start_shopping/unknown handler. Calls `getWorkflow(ctx.chat.type)` to get chat-specific UX. |
+| `handleNLCommand(ctx, text)` | `Promise<void>` | Central NL dispatch: calls `classifyAndExtract` (returns `NLCommandStep[]`). Single step → routes to dedicated handler. Multiple steps (compound) → runs each DB-only, then a single UI update at end. |
 
-**Intents dispatched:**
+**Single-step intents dispatched:**
 - `add` → adds items, deduplicates by `code`; delegates feedback to `workflow.afterAdd`
 - `remove` → calls `resolveRemoveTargets` then `removeItem` for matched items; delegates feedback to `workflow.afterRemove`
 - `show` → delegates to `workflow.afterShow`
 - `start_shopping` → guards, delegates to `coreStartShopping` then `workflow.afterStartShopping`
 - `unknown` → `workflow.replyUnknown`
 
-All private/group UX differences are encapsulated in `ChatWorkflow` implementations — no `isGroup` checks in this file.
+**Compound path** (e.g. "убери молоко и добавь кефир", "замени X на Y"):
+- Iterates steps in order; each step runs only DB operations (no UI)
+- After all steps: for groups sends one combined summary reply; for all chat types calls `editStatusMessage` once
+- If list is empty after compound: IDLE transition (group → `deleteStatusMessage`, private → `editStatusMessage` to idle)
 
 ## src/status.ts
 

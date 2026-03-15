@@ -8,11 +8,11 @@ import {
   removeItem,
   clearList,
 } from "../db.js";
-import type { ExtractedGroup } from "../extractor.js";
+import type { ExtractedGroup, NLCommandStep } from "../extractor.js";
 import { classifyAndExtract, resolveRemoveTargets } from "../extractor.js";
 import type { BotState } from "../extractor.js";
 import { isShoppingMode, coreStartShopping } from "./shop.js";
-import { getWorkflow } from "./workflow.js";
+import { getWorkflow, buildStatusContent, pluralItems } from "./workflow.js";
 import { renderIdleStatus, renderItemName } from "../render.js";
 import { editStatusMessage, deleteStatusMessage } from "../status.js";
 import { logger } from "../logger.js";
@@ -38,8 +38,14 @@ export async function handleNLCommand(ctx: Context, text: string): Promise<void>
 
   logger.debug("nl", `chat:${chatId} state=${state} text="${text.slice(0, 80)}"`);
 
-  const cmd = await classifyAndExtract(text, state);
+  const steps = await classifyAndExtract(text, state);
 
+  if (steps.length > 1) {
+    await handleCompound(ctx, steps, state, workflow);
+    return;
+  }
+
+  const cmd = steps[0];
   switch (cmd.intent) {
     case "add":
       await handleNLAdd(ctx, cmd.groups, state, workflow);
@@ -61,6 +67,121 @@ export async function handleNLCommand(ctx: Context, text: string): Promise<void>
       await workflow.replyUnknown(ctx, state);
       break;
   }
+}
+
+/** Handle compound NL commands ("убери X и добавь Y", "замени X на Y"). */
+async function handleCompound(
+  ctx: Context,
+  steps: NLCommandStep[],
+  state: BotState,
+  workflow: ReturnType<typeof getWorkflow>,
+): Promise<void> {
+  const chatId = ctx.chat!.id;
+  const chatType = ctx.chat!.type;
+  const isPrivate = chatType !== "group" && chatType !== "supergroup";
+
+  let addedCount = 0;
+  let dupCount = 0;
+  const removedNames: string[] = [];
+  let currentState = state;
+
+  for (const step of steps) {
+    if (step.intent === "add") {
+      const r = await executeAddStep(chatId, step.groups, currentState);
+      addedCount += r.addedCount;
+      dupCount += r.dupCount;
+      currentState = "NORMAL";
+    } else if (step.intent === "remove") {
+      if (currentState === "IDLE") continue; // nothing to remove yet
+      const removed = await executeRemoveStep(chatId, step.query);
+      removedNames.push(...removed.map((i) => renderItemName(i)));
+    }
+    // show / start_shopping / unknown: skip in compound
+  }
+
+  // Group: send one combined summary reply
+  if (!isPrivate) {
+    const parts: string[] = [];
+    if (removedNames.length > 0) parts.push(`🗑 Удалено: ${removedNames.join(", ")}`);
+    if (addedCount > 0) parts.push(`✅ Добавлено: ${pluralItems(addedCount)}`);
+    if (dupCount > 0) parts.push(`${dupCount} уже в списке`);
+    if (parts.length > 0) {
+      await ctx.reply(parts.join(" · "), {
+        reply_parameters: { message_id: ctx.message!.message_id },
+      });
+    }
+  }
+
+  // Single UI update at end
+  const finalState = getBotState(chatId);
+  if (finalState === "IDLE") {
+    if (!isPrivate) {
+      await deleteStatusMessage(ctx.api, chatId, chatType);
+    } else {
+      const s = renderIdleStatus();
+      await editStatusMessage(ctx.api, chatId, s.text, s.keyboard);
+    }
+  } else {
+    const data = getActiveList(chatId);
+    if (data) {
+      const visible = getVisibleItems(data.list.id);
+      const { text: statusText, keyboard } = buildStatusContent(finalState, visible);
+      await editStatusMessage(ctx.api, chatId, statusText, keyboard);
+    }
+  }
+
+  // Delete user message in private
+  if (isPrivate && ctx.message) {
+    try { await ctx.api.deleteMessage(chatId, ctx.message.message_id); } catch { /* ignore */ }
+  }
+}
+
+async function executeAddStep(
+  chatId: number,
+  groups: ExtractedGroup[],
+  state: BotState,
+): Promise<{ addedCount: number; dupCount: number }> {
+  if (state === "IDLE") {
+    createList(chatId, groups);
+    const total = groups.flatMap((g) => g.items).length;
+    logger.info("nl", `chat:${chatId} compound auto-created list with ${total} item(s)`);
+    return { addedCount: total, dupCount: 0 };
+  }
+
+  const data = getActiveList(chatId);
+  if (!data) return { addedCount: 0, dupCount: 0 };
+
+  const listId = data.list.id;
+  const allCodes = groups.flatMap((g) => g.items.map((i) => i.code));
+  const dupes = findDuplicateItems(listId, allCodes);
+  const dupeSet = new Set(dupes.map((n) => n.toLowerCase().trim()));
+  const filteredGroups = groups
+    .map((g) => ({ group: g.group, items: g.items.filter((i) => !dupeSet.has(i.code.toLowerCase().trim())) }))
+    .filter((g) => g.items.length > 0);
+
+  if (filteredGroups.length === 0) return { addedCount: 0, dupCount: dupes.length };
+
+  const added = addItemsToList(listId, chatId, filteredGroups);
+  logger.info("nl", `chat:${chatId} compound added ${added.length} item(s), ${dupes.length} dup(s)`);
+  return { addedCount: added.length, dupCount: dupes.length };
+}
+
+async function executeRemoveStep(
+  chatId: number,
+  query: string,
+): Promise<{ id: number; code: string; details: string | null }[]> {
+  const data = getActiveList(chatId);
+  if (!data) return [];
+
+  const visible = getVisibleItems(data.list.id);
+  const targets = await resolveRemoveTargets(query, visible);
+  for (const item of targets) {
+    removeItem(item.id);
+  }
+  if (targets.length > 0) {
+    logger.info("nl", `chat:${chatId} compound removed ${targets.length} item(s): [${targets.map((i) => i.code).join(", ")}]`);
+  }
+  return targets;
 }
 
 async function handleNLAdd(
