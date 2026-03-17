@@ -53,4 +53,6 @@ The `group` column is added to existing databases at startup via a safe `ALTER T
 | `getStatusMsgId(chatId)`                        | `number \| null`          | Returns `status_msg_id` for reply-to-status matching; null if not set |
 | `clearStatusMsgId(chatId)`                      | `void`                    | Sets `status_msg_id = NULL` in DB (called after status message is deleted) |
 | `findDuplicateItems(listId, codes[])`           | `string[]`                | Case-insensitive check of `code` against visible items; returns subset of `codes` already in the list |
+| `findVisibleItemByCode(listId, code)`           | `ItemRow \| null`         | Find visible item by code — case-insensitive AND word-order-insensitive (e.g. "масло растительное" matches "растительное масло"). Used by merge logic. |
+| `updateItemDetails(itemId, details)`            | `void`                    | Updates the `details` column for one item. Used by merge and partial-remove logic. |
 | `addItemsToList(listId, chatId, groups)`        | `ItemRow[]`               | Appends items in transaction, returns new rows; same `groups` shape as `createList` |

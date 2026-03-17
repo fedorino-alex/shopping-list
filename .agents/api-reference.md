@@ -8,18 +8,19 @@
 export interface ExtractedItem {
   code: string;       // canonical base/nominative product name (e.g. "картошка", "белое вино")
   details?: string;   // optional quantity/weight (e.g. "1кг", "2л")
+  qty?: ParsedQty;    // structured quantity from LLM (e.g. {value:2, unit:"кг"})
 }
 
 export interface ExtractedGroup {
   group: string;          // Russian department name (from supermarket-sections.md)
-  items: ExtractedItem[]; // structured items with code + optional details
+  items: ExtractedItem[]; // structured items with code + optional details + optional qty
 }
 
 export type BotState = 'IDLE' | 'NORMAL' | 'SHOPPING';
 
 export type NLCommandStep =
   | { intent: 'add'; groups: ExtractedGroup[] }
-  | { intent: 'remove'; query: string }  // query = normalized removal phrase, e.g. "вино"
+  | { intent: 'remove'; query: string; qty?: ParsedQty }  // qty for partial removal
   | { intent: 'show' }
   | { intent: 'start_shopping' }
   | { intent: 'unknown' };
@@ -30,8 +31,8 @@ export type NLCommand = NLCommandStep;
 
 | Function                              | Returns                    | Description |
 |---------------------------------------|----------------------------|-------------|
-| `classifyAndExtract(text, state)`     | `Promise<NLCommandStep[]>` | Single Groq call: classifies intent AND extracts items/query. Returns an **ordered array** — usually one element, but two for compound messages like "убери X и добавь Y" or "замени X на Y". Returns `[{intent:'unknown'}]` if Groq key absent or on error. |
-| `resolveRemoveTargets(query, items)`  | `Promise<ItemRow[]>`       | Given a removal query and visible items list, uses Groq semantically to find which items match (e.g. "вино" → ["белое вино", "красное вино"]). Substring fallback if Groq unavailable. |
+| `classifyAndExtract(text, state)`     | `Promise<NLCommandStep[]>` | Single LLM call: classifies intent AND extracts items/query. Returns an **ordered array** — usually one element, but two for compound messages like "убери X и добавь Y" or "замени X на Y". For `add`: canonicalizes item codes. For `remove`: preserves user's exact words as query (no canonicalization). Logs raw LLM response and per-item detail at debug level. Returns `[{intent:'unknown'}]` if LLM not configured or on error. |
+| `resolveRemoveTargets(query, items)`  | `Promise<ItemRow[]>`       | Two-phase removal matching: (1) exact match by code (case-insensitive) → returns only that item, no LLM call; (2) no exact match → LLM resolves fuzzy/category matches (e.g. "вино" → ["белое вино", "красное вино"]). Substring fallback if LLM unavailable. |
 
 ## src/handlers/workflow.ts
 
@@ -67,11 +68,24 @@ export interface ChatWorkflow {
 | `handleNLCommand(ctx, text)` | `Promise<void>` | Central NL dispatch: calls `classifyAndExtract` (returns `NLCommandStep[]`). Single step → routes to dedicated handler. Multiple steps (compound) → runs each DB-only, then a single UI update at end. |
 
 **Single-step intents dispatched:**
-- `add` → adds items, deduplicates by `code`; delegates feedback to `workflow.afterAdd`
-- `remove` → calls `resolveRemoveTargets` then `removeItem` for matched items; delegates feedback to `workflow.afterRemove`
+- `add` → merges quantities for duplicates (via `mergeOrInsertItems`), adds new items, delegates feedback to `workflow.afterAdd`
+- `remove` → calls `resolveRemoveTargets`; if `qty` specified, subtracts from existing quantity (partial removal via `applyPartialRemove`); if result ≤ 0 or no qty, removes entirely; delegates feedback to `workflow.afterRemove`
 - `show` → delegates to `workflow.afterShow`
 - `start_shopping` → guards, delegates to `coreStartShopping` then `workflow.afterStartShopping`
 - `unknown` → `workflow.replyUnknown`
+
+**Quantity merging** (`mergeOrInsertItems` helper):
+- For each incoming item, looks up existing by code (case-insensitive)
+- Both have compatible qty → **adds** quantities (with unit conversion: кг↔г, л↔мл)
+- Both have incompatible qty → **appends** to details string ("2 пачки" + "1кг" → "2 пачки, 1кг")
+- Existing bare + incoming шт → assumes existing was 1 шт, **adds** (e.g. bare + "3 шт" → "4 шт")
+- Existing bare + incoming non-шт → **overwrites** details with more specific info (e.g. bare + "2кг" → "2кг")
+- Existing has qty + incoming bare → **increments** by 1 of existing's unit
+- Neither has qty → **skips** as duplicate
+
+**Partial removal** (`applyPartialRemove` helper):
+- If remove has `qty` and item has parseable quantity → subtracts; updates details if result > 0
+- If result ≤ 0 or no qty on remove command → removes item entirely
 
 **Compound path** (e.g. "убери молоко и добавь кефир", "замени X на Y"):
 - Iterates steps in order; each step runs only DB operations (no UI)

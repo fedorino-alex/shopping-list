@@ -1,4 +1,5 @@
 import { logger } from "./logger.js";
+import type { ParsedQty } from "./quantity.js";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.LLM_MODEL ?? "llama-3.3-70b-versatile";
@@ -8,6 +9,7 @@ const LLM_ENABLED = !!(GROQ_API_KEY || process.env.LLM_BASE_URL);
 export interface ExtractedItem {
   code: string;
   details?: string;
+  qty?: ParsedQty; // structured quantity parsed by LLM, e.g. {value:2, unit:"кг"}
 }
 
 export interface ExtractedGroup {
@@ -19,7 +21,7 @@ export type BotState = 'IDLE' | 'NORMAL' | 'SHOPPING';
 
 export type NLCommandStep =
   | { intent: 'add'; groups: ExtractedGroup[] }
-  | { intent: 'remove'; query: string }
+  | { intent: 'remove'; query: string; qty?: ParsedQty }
   | { intent: 'show' }
   | { intent: 'start_shopping' }
   | { intent: 'unknown' }
@@ -33,13 +35,13 @@ const DEPT_MAPPING = `- Хлеб и хлебобулочные изделия: �
 - Сухофрукты и орехи: сухофрукты, орехи, семечки, мак, чипсы из фруктов и овощей
 - Замороженные продукты: мороженое, замороженные овощи, замороженные фрукты, замороженная рыба, замороженное мясо, пельмени, вареники
 - Мясо и птица: курица, индейка, свинина, говядина, фарш, баранина, стейки, телятина
-- Рыба и морепродукты: свежая рыба, копчёная рыба, вяленая рыба, морепродукты, суши, сельдь
-- Сыры: сыры всех видов, маскарпоне, рикотта, плавленые сыры
-- Колбасные изделия: колбасы, сосиски, кабанос, паштеты, кровянка
-- Готовые блюда и кулинария: готовые блюда, супы, дания в банках, пицца
-- Молоко, молочные продукты и яйца: молоко, сметана, йогурты, кефир, творог, масло, маргарин, яйца, дрожжи
+- Рыба и морепродукты: свежая рыба, копчёная рыба, вяленая рыба, морепродукты, суши, сельдь матиас, икра
+- Сыры: сыры всех видов, маскарпоне, рикотта, плавленые сыры, гауда, пармезан, моцарелла, брынза, фета, сыр с плесенью
+- Колбасные изделия: колбасы, сосиски, кабанос, паштеты, кровянка, ветчина, мясные деликатесы
+- Готовые блюда и кулинария: готовые блюда, супы, дания в банках, пицца, кура гриль
+- Молоко, молочные продукты и яйца: молоко, сметана, йогурты, кефир, творог, сливочное масло, маргарин, яйца, дрожжи
 - Растительные продукты: тофу, хумус, растительное мясо, растительное молоко, растительные сыры
-- Кухни мира: японские, китайские, корейские, мексиканские, индийские, итальянские продукты
+- Кухни мира: японские продукты, китайские продукты, корейские продукты, мексиканские продукты, индийские продукты, итальянские продукты
 - Напитки и соки: вода, соки, газировка, нектары, морсы, энергетики, изотоники, сиропы
 - Сладости: шоколад, конфеты, леденцы, печенье, батончики, жевательная резинка, халва
 - Солёные закуски: чипсы, снеки, хрустяшки, крекеры, попкорн, орешки, вяленое мясо
@@ -48,7 +50,7 @@ const DEPT_MAPPING = `- Хлеб и хлебобулочные изделия: �
 - Крупы и сыпучие продукты: сахар, мука, крупы, рис, гречка, макароны, бобовые, семена
 - Товары для выпечки: разрыхлитель, ванилин, желатин, пищевые красители, кондитерские добавки
 - Кофе, чай и какао: кофе, чай, какао, ройбуш, мате, горячий шоколад
-- Алкоголь: пиво, вино, водка, виски, ром, джин, коньяк, ликёр, текила, сидр, медовуха
+- Алкоголь: пиво, пиво безалкогольное (0%), крафтовое пиво, вино красное, вино белое, вино розовое, шампанское, игристое вино, просекко, водка, виски, ром, джин, коньяк, ликёр, текила, сидр, настойки, медовуха
 - Бытовая химия и чистящие средства: стиральный порошок, средства для посудомойки, средства для мытья посуды, чистящие средства, губки, швабры, мусорные пакеты, туалетная бумага, освежитель воздуха
 - Гигиена и косметика: мыло, гель для душа, шампунь, кондиционер, зубная паста, дезодорант, духи, крем, подгузники, прокладки, тампоны, витамины
 - Товары для детей и мам: детское молоко (смесь), детское питание, детские соки, детская косметика, пелёнки
@@ -60,7 +62,7 @@ const DEPT_MAPPING = `- Хлеб и хлебобулочные изделия: �
 - Сад и огород: садовая мебель, грунт, семена, удобрения, аксессуары для гриля
 - Электроника и мультимедиа: наушники, колонки, зарядное устройство, кабель, чехол для телефона
 - Спорт и отдых: спортинвентарь, спортивная одежда
-- Автотовары: моторное масло, автохимия, размораживатель`;
+- Автотовары: моторное масло, машинное масло, автохимия, размораживатель`;
 
 
 
@@ -80,12 +82,21 @@ function parseGroups(raw: unknown): ExtractedGroup[] {
           (it): it is { code: string; details?: string | null } =>
             typeof (it as Record<string, unknown>).code === "string"
         )
-        .map((it) => ({
-          code: it.code.trim(),
-          ...(it.details && typeof it.details === "string" && it.details.trim()
-            ? { details: it.details.trim() }
-            : {}),
-        }))
+        .map((it) => {
+          const item: ExtractedItem = { code: it.code.trim() };
+          if (it.details && typeof it.details === "string" && it.details.trim()) {
+            item.details = it.details.trim();
+          }
+          // Parse structured qty from LLM output
+          const rawQty = (it as Record<string, unknown>).qty;
+          if (rawQty && typeof rawQty === "object" && rawQty !== null) {
+            const q = rawQty as Record<string, unknown>;
+            if (typeof q.value === "number" && q.value > 0 && typeof q.unit === "string" && q.unit.trim()) {
+              item.qty = { value: q.value, unit: q.unit.trim().toLowerCase() };
+            }
+          }
+          return item;
+        })
         .filter((it) => it.code.length > 0),
     }))
     .filter((g) => g.items.length > 0);
@@ -129,6 +140,7 @@ export async function classifyAndExtract(text: string, state: BotState): Promise
 
     const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
     const raw = json.choices?.[0]?.message?.content?.trim() ?? "";
+    logger.debug("extractor", `LLM raw response: ${raw}`);
     const parsed = JSON.parse(raw) as Record<string, unknown>;
 
     const rawCommands = Array.isArray(parsed.commands) ? parsed.commands : null;
@@ -148,7 +160,19 @@ export async function classifyAndExtract(text: string, state: BotState): Promise
         steps.push({ intent: "start_shopping" });
       } else if (intent === "remove") {
         const query = typeof c.query === "string" ? c.query.trim() : "";
-        steps.push(query ? { intent: "remove", query } : { intent: "unknown" });
+        if (!query) { steps.push({ intent: "unknown" }); }
+        else {
+          const step: NLCommandStep = { intent: "remove", query };
+          // Parse optional qty for partial removal
+          const rawQty = c.qty;
+          if (rawQty && typeof rawQty === "object" && rawQty !== null) {
+            const q = rawQty as Record<string, unknown>;
+            if (typeof q.value === "number" && q.value > 0 && typeof q.unit === "string" && q.unit.trim()) {
+              step.qty = { value: q.value, unit: q.unit.trim().toLowerCase() };
+            }
+          }
+          steps.push(step);
+        }
       } else if (intent === "add") {
         const groups = parseGroups(c.groups);
         steps.push(groups.length > 0 ? { intent: "add", groups } : { intent: "unknown" });
@@ -165,6 +189,17 @@ export async function classifyAndExtract(text: string, state: BotState): Promise
       "extractor",
       `classify: [${steps.map((s) => s.intent).join(", ")}]${itemCount > 0 ? `, ${itemCount} item(s)` : ""}`,
     );
+    for (const s of steps) {
+      if (s.intent === "add") {
+        for (const g of s.groups) {
+          for (const it of g.items) {
+            logger.debug("extractor", `  + [${g.group}] ${it.code}${it.details ? ` (${it.details})` : ""}${it.qty ? ` qty={${it.qty.value} ${it.qty.unit}}` : ""}`);
+          }
+        }
+      } else if (s.intent === "remove") {
+        logger.debug("extractor", `  - remove "${s.query}"${s.qty ? ` qty={${s.qty.value} ${s.qty.unit}}` : ""}`);
+      }
+    }
     return steps.length > 0 ? steps : [{ intent: "unknown" }];
   } catch (err) {
     logger.error("extractor", "classify groq error", err);
@@ -195,17 +230,23 @@ Single-intent messages produce a one-element array. Commands must be in executio
 
 Return ONLY valid JSON: {"commands": [...]}
 Each element:
-- add: {"intent":"add","groups":[{"group":"<exact dept name>","items":[{"code":"canonical item name","details":"quantity or null"}]}]}
-- remove: {"intent":"remove","query":"<canonical base form, e.g. вино, молоко>"}
+- add: {"intent":"add","groups":[{"group":"<exact dept name>","items":[{"code":"canonical item name","details":"quantity or null","qty":{"value":NUMBER,"unit":"UNIT"}|null}]}]}
+- remove: {"intent":"remove","query":"<canonical base form, e.g. вино, молоко>","qty":{"value":NUMBER,"unit":"UNIT"}|null}
 - others: {"intent":"show"} / {"intent":"start_shopping"} / {"intent":"unknown"}
 
 Department mapping (use these exact Russian department names):
 ${DEPT_MAPPING}
 
 Rules for extraction (intent="add"):
-- code: canonical base/nominative form (1–4 words), e.g. "картошка", "белое вино"
+- code: canonical base/nominative form in PLURAL (1–4 words), e.g. "котлеты", "булочки", "яйца", "белое вино". Always prefer plural for countable items. Use singular only for uncountable products (e.g. "молоко", "рис", "сахар").
+- Deduplicate: if the same product appears multiple times (even with different word order or singular/plural form), merge into ONE item with a single canonical code. Combine quantities if both have them.
 - details: quantity/weight if mentioned ("1кг", "2л"), else null
-- Strip command words ("добавь", "купи", "замени" etc.); keep original language; unknown items → "Разное"`;
+- qty: structured quantity object if a numeric amount is specified. value = the number, unit = normalized unit ("кг","г","л","мл","шт","уп","бут","пачка","банка","пучок"). If no quantity mentioned, qty = null. Examples: "2кг" → {"value":2,"unit":"кг"}, "одну" → {"value":1,"unit":"шт"}, "пару литров" → {"value":2,"unit":"л"}
+- Strip command words ("добавь", "купи", "замени" etc.); keep original language; unknown items → "Разное"
+
+Rules for extraction (intent="remove"):
+- query: the product name as the user specified it (preserve adjectives!). Strip only command words ("убери", "удали", "вычеркни"). Examples: "убери сливочное масло" → query="сливочное масло"; "убери сливочное" → query="сливочное"; "удали молоко" → query="молоко". Do NOT canonicalize or shorten the query.
+- qty: structured quantity to remove, if the user specifies an amount. E.g. "убери 1кг сахара" → {"value":1,"unit":"кг"}. "убери сахар" (no amount) → null`;
 }
 
 /**
@@ -219,6 +260,15 @@ export async function resolveRemoveTargets(
 ): Promise<{ id: number; code: string; details: string | null }[]> {
   if (items.length === 0) return [];
 
+  // Fast path: exact match by code (case-insensitive) → return only that item, skip LLM
+  const q = query.toLowerCase().trim();
+  const exactMatch = items.find((i) => i.code.toLowerCase().trim() === q);
+  if (exactMatch) {
+    logger.debug("extractor", `resolveRemoveTargets: query="${query}" exact match → "${exactMatch.code}"`);
+    return [exactMatch];
+  }
+
+  // No exact match → use LLM to resolve fuzzy/category matches
   if (LLM_ENABLED) {
     try {
       const itemList = items
@@ -238,7 +288,7 @@ export async function resolveRemoveTargets(
           messages: [
             {
               role: "system",
-              content: `You are a shopping list assistant. The user wants to remove items. Given the current list, return which items match the removal query.\n\nCurrent items:\n${itemList}\n\nReturn ONLY JSON: {"matching": ["exact item name 1", "exact item name 2"]}\nCopy item names EXACTLY as they appear in the list above.\n\nMatching rules:\n- "вино" with ["\u0431\u0435\u043b\u043e\u0435 \u0432\u0438\u043d\u043e", "\u043a\u0440\u0430\u0441\u043d\u043e\u0435 \u0432\u0438\u043d\u043e"] \u2192 matches both (query is the root noun of all items)\n- "\u0441\u044b\u0440\u044b" with ["\u0441\u044b\u0440 \u0441 \u043f\u043b\u0435\u0441\u0435\u043d\u044c\u044e", "\u0441\u044b\u0440 \u0441 \u0442\u0440\u0430\u0432\u0430\u043c\u0438", "\u043c\u043e\u043b\u043e\u043a\u043e"] \u2192 matches only the cheese items (\u0441\u044b\u0440*)\n- "\u043c\u043e\u043b\u043e\u043a\u043e" with ["\u043c\u043e\u043b\u043e\u043a\u043e", "\u0448\u043e\u043a\u043e\u043b\u0430\u0434\u043d\u043e\u0435 \u043c\u043e\u043b\u043e\u043a\u043e"] \u2192 matches only "\u043c\u043e\u043b\u043e\u043a\u043e" (exact match exists, do not match items where query is only a component modifier)\n- Match by the item's NAME only \u2014 do NOT match by food category or related products\n- Return {"matching": []} if nothing clearly matches by name`,
+              content: `You are a shopping list assistant. The user wants to remove items matching the query. There is NO exact match in the list, so find items where the query is a root word or category.\n\nCurrent items:\n${itemList}\n\nReturn ONLY JSON: {"matching": ["exact item name 1", "exact item name 2"]}\nCopy item names EXACTLY as they appear in the list above.\n\nExamples:\n- query "вино", list ["белое вино", "красное вино"] → {"matching": ["белое вино", "красное вино"]} (query is root noun)\n- query "сыры", list ["сыр с плесенью", "сыр с травами", "молоко"] → {"matching": ["сыр с плесенью", "сыр с травами"]} (match by root noun, not молоко)\n- query "масло", list ["сливочное масло", "машинное масло", "растительное масло"] → {"matching": ["сливочное масло", "машинное масло", "растительное масло"]} (all contain the root word)\n- Match by item NAME only — do NOT match by food category or related products\n- Return {"matching": []} if nothing clearly matches by name`,
             },
             { role: "user", content: query },
           ],
@@ -265,7 +315,6 @@ export async function resolveRemoveTargets(
   }
 
   // Heuristic fallback: substring matching on code
-  const q = query.toLowerCase().trim();
   return items.filter(
     (item) => item.code.toLowerCase().includes(q) || q.includes(item.code.toLowerCase()),
   );

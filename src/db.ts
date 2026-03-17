@@ -177,6 +177,10 @@ const stmtHideItem = db.prepare(
   `UPDATE items SET hidden = 1 WHERE id = ?`
 );
 
+const stmtUpdateItemDetails = db.prepare(
+  `UPDATE items SET details = ? WHERE id = ?`
+);
+
 // --- Public API: Chats ---
 
 export function getChat(chatId: number): ChatRow {
@@ -326,6 +330,57 @@ export function removeItem(itemId: number): ItemRow | null {
   if (!item) return null;
   stmtHideItem.run(itemId);
   return item;
+}
+
+/**
+ * Update the details (quantity) of a single item.
+ */
+export function updateItemDetails(itemId: number, details: string | null): void {
+  stmtUpdateItemDetails.run(details, itemId);
+}
+
+/** Normalize a code for comparison: lowercase, trim, sort words. */
+function normalizeCode(code: string): string {
+  return code.toLowerCase().trim().split(/\s+/).sort().join(" ");
+}
+
+/** Simple Russian stemmer: strip common noun endings for fuzzy matching. */
+function stemWord(word: string): string {
+  // Order matters: try longer suffixes first
+  const suffixes = [
+    "ами", "ями", "ого", "его", "ому", "ему",
+    "ой", "ей", "ые", "ие", "ых", "их", "ов", "ев", "ах", "ях",
+    "ы", "и", "а", "я", "у", "е", "о",
+  ];
+  // Don't stem very short words (3 chars or less after stem would be < 2)
+  for (const s of suffixes) {
+    if (word.length > s.length + 2 && word.endsWith(s)) {
+      return word.slice(0, -s.length);
+    }
+  }
+  return word;
+}
+
+/** Stem each word in a code and sort — for morphological + word-order matching. */
+function stemCode(code: string): string {
+  return code.toLowerCase().trim().split(/\s+/).map(stemWord).sort().join(" ");
+}
+
+/**
+ * Find a visible item by code in a list.
+ * Matches case-insensitively, word-order-insensitively, and morphologically
+ * (e.g. "котлета" matches "котлеты", "масло растительное" matches "растительное масло").
+ * Returns the first match, or null if not found.
+ */
+export function findVisibleItemByCode(listId: number, code: string): ItemRow | null {
+  const visible = stmtGetVisibleItems.all(listId) as ItemRow[];
+  const lower = code.toLowerCase().trim();
+  const normalized = normalizeCode(code);
+  const stemmed = stemCode(code);
+  return visible.find((i) => {
+    const iLower = i.code.toLowerCase().trim();
+    return iLower === lower || normalizeCode(i.code) === normalized || stemCode(i.code) === stemmed;
+  }) ?? null;
 }
 
 /**

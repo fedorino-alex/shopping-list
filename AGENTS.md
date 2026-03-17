@@ -53,6 +53,7 @@ shopping-list/
     index.ts              # Entry point: /start, my_chat_member, callback routing, NL text routing
     db.ts                 # SQLite: chats/lists/items tables, all CRUD, soft deletes
     extractor.ts          # classifyAndExtract(text, state) → NLCommandStep[]; resolveRemoveTargets for NL remove
+    quantity.ts           # Quantity parsing/arithmetic/formatting for merge (parseQty, addQty, subtractQty, formatQty)
     render.ts             # Status + item renderers (all states); renderListSummary for NL show reply
     status.ts             # editStatusMessage, sendStatusMessage (auto-pins in groups), deleteMessages
     logger.ts             # Structured logger: debug/info/error with timestamps
